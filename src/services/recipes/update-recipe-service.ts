@@ -13,7 +13,9 @@ export async function updateRecipeService(id: string, data: UpdateRecipeInput, u
 
     // Check if recipe exists and belongs to the user
     const ownerId = user.id;
-    if (!await recipeRepository.findById(id, ownerId)) return { code: 404, status: "error", message: "Recipe not found" };
+    if (!await recipeRepository.findById(id, ownerId)) {
+      return { code: 404, status: "error", message: "Recipe not found" }
+    };
 
     // Update recipe
     const recipe = await recipeRepository.update(id, data, ownerId);
