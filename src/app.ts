@@ -15,8 +15,9 @@ app.use(cors({
   credentials: true
 }));
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// Complaint attachments arrive as base64 data URLs (<= 5 MB file).
+app.use(express.json({ limit: "8mb" }));
+app.use(express.urlencoded({ extended: true, limit: "8mb" }));
 app.use(cookieParser());
 app.use(hpp());
 

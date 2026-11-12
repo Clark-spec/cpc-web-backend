@@ -13,7 +13,9 @@ export class NotificationController {
         return res.status(401).json({ status: "error", message: "Unauthorized" });
       }
 
-      const data = await repo.findByUserId(userId);
+      const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const data = await repo.findPageByUserId(userId, { limit, offset });
       return res.status(200).json({
         status: "success",
         data,
@@ -27,7 +29,7 @@ export class NotificationController {
   public markNotificationRead = async (req: Request, res: Response) => {
     try {
       const userId = (req as AuthenticatedRequest).user?.sub ?? "";
-      const notifId = req.params.id;
+      const notifId = String(req.params.id ?? "");
       if (!userId || !notifId) {
         return res.status(400).json({ status: "error", message: "Invalid request" });
       }
@@ -68,7 +70,7 @@ export class NotificationController {
   public deleteNotification = async (req: Request, res: Response) => {
     try {
       const userId = (req as AuthenticatedRequest).user?.sub ?? "";
-      const notifId = req.params.id;
+      const notifId = String(req.params.id ?? "");
       if (!userId || !notifId) {
         return res.status(400).json({ status: "error", message: "Invalid request" });
       }

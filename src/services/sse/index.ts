@@ -21,3 +21,25 @@ export function broadcastNotificationUpdated(userId: string) {
   broadcastToUser(userId, { event: "notification_updated", data: {} });
 }
 
+/** Delivers a new bell item straight away, so the badge needs no refetch. */
+export function broadcastNotificationCreated(
+  userId: string,
+  data: {
+    id: string;
+    title: string | null;
+    message: string;
+    type: string;
+    href: string | null;
+    createdAt: string;
+  },
+) {
+  broadcastToUser(userId, { event: "notification_created", data });
+}
+
+export function broadcastComplaintUpdated(
+  userId: string,
+  data: { complaintId: string; status: string; updatedAt: string; adminRemarks: string },
+) {
+  broadcastToUser(userId, { event: "complaint_updated", data });
+}
+

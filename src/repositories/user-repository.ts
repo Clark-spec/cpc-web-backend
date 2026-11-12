@@ -1,6 +1,6 @@
-import { eq, or } from "drizzle-orm";
+import { eq, or, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { users } from "@/db/schema";
+import { users, role } from "@/db/schema";
 import type { SignupInput } from "@/schema/auth-schema";
 import { randomUUID } from "node:crypto";
 
@@ -159,6 +159,70 @@ export const memUsers: FallbackUser[] = [
     updatedAt: new Date().toISOString(),
     emailVerified: new Date().toISOString(),
   },
+  {
+    id: "a8888888-8888-8888-8888-888888888888",
+    name: "Prof. Lorna Fernandez",
+    email: "sao@cpc.edu.ph",
+    studentNumber: null,
+    password: DEFAULT_HASH,
+    role: "SAO",
+    course: null,
+    yearLevel: null,
+    department: "Student Affairs Office",
+    phone: null,
+    avatarUrl: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    emailVerified: new Date().toISOString(),
+  },
+  {
+    id: "a9999999-9999-9999-9999-999999999999",
+    name: "Ms. Ana Villanueva",
+    email: "library@cpc.edu.ph",
+    studentNumber: null,
+    password: DEFAULT_HASH,
+    role: "LIBRARY",
+    course: null,
+    yearLevel: null,
+    department: "Library",
+    phone: null,
+    avatarUrl: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    emailVerified: new Date().toISOString(),
+  },
+  {
+    id: "b1111111-1111-1111-1111-111111111111",
+    name: "Mr. Jose Cruz",
+    email: "accounting@cpc.edu.ph",
+    studentNumber: null,
+    password: DEFAULT_HASH,
+    role: "ACCOUNTING",
+    course: null,
+    yearLevel: null,
+    department: "Accounting Office",
+    phone: null,
+    avatarUrl: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    emailVerified: new Date().toISOString(),
+  },
+  {
+    id: "b2222222-2222-2222-2222-222222222222",
+    name: "Prof. Ramon Dela Cruz",
+    email: "instructor@cpc.edu.ph",
+    studentNumber: null,
+    password: DEFAULT_HASH,
+    role: "INSTRUCTOR",
+    course: null,
+    yearLevel: null,
+    department: "College of Computer Studies",
+    phone: null,
+    avatarUrl: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    emailVerified: new Date().toISOString(),
+  },
 ];
 
 export class UserRepository {
@@ -175,6 +239,21 @@ export class UserRepository {
     const { password: _pw, ...pub } = found;
     void _pw;
     return pub as any;
+  }
+
+  /** Ids of every account holding one of the given staff roles. */
+  async findIdsByRoles(roles: string[]) {
+    try {
+      const rows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(inArray(users.role, roles as (typeof role.enumValues)[number][]));
+      return rows.map((row) => row.id);
+    } catch {
+      return memUsers
+        .filter((user) => roles.includes(String(user.role)))
+        .map((user) => user.id);
+    }
   }
 
   async findByEmail(email: string) {

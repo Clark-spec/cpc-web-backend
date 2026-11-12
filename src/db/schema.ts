@@ -112,14 +112,54 @@ export const serviceRequests = pgTable("service_request", {
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
 }, (table) => [index("sr_user_idx").on(table.userId)]);
 
+// ─── Complaints ──────────────────────────────────────────────────────────────
+// Identity is intentionally kept out of `complaint`. The private
+// `complaint_submitter` link is the only place a student is tied to a record and
+// is never read by admin queries for anonymous complaints.
+
+export const complaints = pgTable("complaint", {
+  id: uuid().defaultRandom().primaryKey(),
+  referenceNumber: text("reference_number").unique().notNull(),
+  subject: text().notNull(),
+  category: text().notNull(),
+  description: text().notNull(),
+  attachmentName: text("attachment_name"),
+  attachmentType: text("attachment_type"),
+  attachmentSize: integer("attachment_size"),
+  attachmentData: text("attachment_data"),
+  status: text().default("pending").notNull(), // "pending" | "in_review" | "resolved"
+  adminRemarks: text("admin_remarks").default("").notNull(),
+  isAnonymous: boolean("is_anonymous").default(false).notNull(),
+  lastUpdatedById: uuid("last_updated_by_id").references(() => users.id, { onDelete: "set null" }),
+  lastUpdatedByRole: text("last_updated_by_role"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
+}, (table) => [
+  index("complaint_status_idx").on(table.status),
+  index("complaint_created_idx").on(table.createdAt),
+]);
+
+export const complaintSubmitters = pgTable("complaint_submitter", {
+  complaintId: uuid("complaint_id").primaryKey().references(() => complaints.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  index("complaint_submitter_user_idx").on(table.userId, table.createdAt),
+]);
+
 export const notifications = pgTable("notification", {
   id: uuid().defaultRandom().primaryKey(),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  title: text("title"),
   message: text("message").notNull(),
   type: text("type").default("info").notNull(), // "info" | "success" | "warning"
   officeId: text("office_id"),
   href: text("href"),
   read: boolean("read").default(false).notNull(),
+  readAt: timestamp("read_at", { withTimezone: true, mode: "string" }),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
-}, (table) => [index("notification_user_idx").on(table.userId)]);
+}, (table) => [
+  index("notification_user_idx").on(table.userId),
+  index("notification_user_read_created_idx").on(table.userId, table.read, table.createdAt),
+]);
 
