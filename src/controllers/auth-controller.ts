@@ -1,4 +1,4 @@
-import { Request, Response } from "express";
+﻿import { Request, Response } from "express";
 import { signupService, loginService, refreshTokenService, logoutService, getUserSessionService, getCsrfTokenService } from "@/services/auth";
 import { setAuthCookies, clearAuthCookies } from "@/lib/auth-cookies";
 
@@ -14,12 +14,13 @@ export class AuthController {
     const { name, email, password } = req.body ?? {};
     const result = await signupService(name, email, password);
     return res.status(result.code).json(result);
-  }
+  };
 
   // Login Function Controller
   public login = async (req: Request, res: Response) => {
-    const { email, password } = req.body ?? {};
-    const result = await loginService(email, password);
+    const { identifier, email, password } = req.body ?? {};
+    const loginId = (identifier || email || "").toString();
+    const result = await loginService(loginId, password);
 
     // Set Auth Cookies if login is successful
     if (result.code === 200 && result.data?.accessToken && result.data?.refreshToken) {
@@ -27,7 +28,7 @@ export class AuthController {
     }
 
     return res.status(result.code).json(result);
-  }
+  };
 
   // Refresh Token Function Controller
   public refreshToken = async (req: Request, res: Response) => {
@@ -40,7 +41,7 @@ export class AuthController {
     }
 
     return res.status(result.code).json(result);
-  }
+  };
 
   // Logout Function Controller
   public logout = async (req: Request, res: Response) => {
@@ -50,7 +51,7 @@ export class AuthController {
       clearAuthCookies(res);
     }
     return res.status(result.code).json(result);
-  }
+  };
 
   // Get Current User Session
   public userSession = async (req: Request, res: Response) => {

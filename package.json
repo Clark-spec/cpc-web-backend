@@ -13,7 +13,8 @@
     "db:plan": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
     "db:studio": "drizzle-kit studio",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "db:seed": "tsx src/db/seed.ts"
   },
   "keywords": [],
   "author": "",

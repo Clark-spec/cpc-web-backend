@@ -1,4 +1,4 @@
-import { UserRepository } from "@/repositories/user-repository";
+﻿import { UserRepository } from "@/repositories/user-repository";
 
 export const getUserSessionService = async (userId: string) => {
   const userRepository = new UserRepository();
@@ -19,7 +19,14 @@ export const getUserSessionService = async (userId: string) => {
           name: user.name,
           email: user.email,
           role: user.role,
+          studentNumber: user.studentNumber,
+          course: user.course,
+          yearLevel: user.yearLevel,
+          department: user.department,
+          avatarUrl: user.avatarUrl,
+          phone: user.phone,
           emailVerified: user.emailVerified,
+          createdAt: user.createdAt,
         },
       },
     };

@@ -1,7 +1,16 @@
-import type { NextFunction, Request, Response } from "express";
+﻿import type { NextFunction, Request, Response } from "express";
 import type { AuthenticatedRequest } from "@/middlewares/auth-middleware";
 
-type Role = "USER" | "ADMIN";
+export type Role =
+  | "USER"
+  | "STUDENT"
+  | "ADMIN"
+  | "REGISTRAR"
+  | "DEAN"
+  | "LIBRARY"
+  | "ACCOUNTING"
+  | "SAO"
+  | "INSTRUCTOR";
 
 export class RoleValidatorMiddleware {
   public validate = (...allowedRoles: Role[]) => {

@@ -1,4 +1,4 @@
-import type { NextFunction, Request, Response } from "express";
+﻿import type { NextFunction, Request, Response } from "express";
 import type { AuthenticatedRequest } from "@/middlewares/auth-middleware";
 import { verifyRefreshToken } from "@/lib/jwt";
 import { validateRequest, csrfSessionCookieName, csrfTokenCookieName } from "@/lib/csrf";
@@ -18,13 +18,16 @@ export class CsrfMiddleware {
 
   // Determine whether signup/login requests need CSRF validation.
   public auth = (req: Request, res: Response, next: NextFunction) => {
-    // Check for browser-related headers or authentication/CSRF cookies.
-    const browserRequest = req.get("origin") || req.get("referer") || req.get("sec-fetch-site")
-      || req.cookies?.accessToken || req.cookies?.refreshToken
-      || req.cookies?.[csrfSessionCookieName] || req.cookies?.[csrfTokenCookieName];
+    // If request is authenticated using Bearer token, skip CSRF
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.toLowerCase().startsWith("bearer ")) {
+      return next();
+    }
 
-    // Skip CSRF validation if no browser indicators are found and the request uses JSON.
-    if (!browserRequest && req.is("application/json")) {
+    // If no CSRF session or auth cookie exists yet (initial login from SPA with JSON), allow through
+    const hasAuthCookie = req.cookies?.accessToken || req.cookies?.refreshToken;
+    const hasCsrfCookie = req.cookies?.[csrfSessionCookieName] || req.cookies?.[csrfTokenCookieName];
+    if (!hasAuthCookie && !hasCsrfCookie && req.is("application/json")) {
       return next();
     }
 

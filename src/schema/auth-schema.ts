@@ -1,24 +1,25 @@
-import { z } from "zod";
+﻿import { z } from "zod";
 
 export const signupSchema = z.object({
   body: z.object({
     name: z
       .string({ message: "Name is required" })
       .min(2, "Name must be at least 2 characters"),
-    email: z.email({
-      message: "Email is required and must be a valid email address",
-    }),
+    email: z.string().email("Invalid email format"),
     password: z
       .string({ message: "Password is required" })
-      .min(8, "Password must be at least 8 characters")
-      .regex(/[A-Z]/, "Password must contain at least one uppercase letter")
-      .regex(/[0-9]/, "Password must contain at least one number"),
+      .min(6, "Password must be at least 6 characters"),
+    studentNumber: z.string().optional(),
+    course: z.string().optional(),
+    yearLevel: z.number().optional(),
+    department: z.string().optional(),
   }),
 });
 
 export const loginSchema = z.object({
   body: z.object({
-    email: z.email("Invalid email format"),
+    identifier: z.string().min(1, "Identifier is required").optional(),
+    email: z.string().optional(),
     password: z.string().min(1, "Password is required"),
   }),
 });
