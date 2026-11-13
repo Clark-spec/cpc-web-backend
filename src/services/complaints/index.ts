@@ -275,13 +275,16 @@ export const createComplaintService = async (userId: string, body: any) => {
 
     if (result.kind === "cooldown") {
       const remaining = new Date(result.nextAllowedAt).getTime() - Date.now();
+      const retryAfter = Math.max(1, Math.ceil(remaining / 1000));
       return {
         code: 429,
         status: "error",
         message: `You can submit another complaint in ${humanizeRemaining(remaining)}.`,
+        retryAfter,
         data: {
           canSubmit: false,
           nextAllowedAt: result.nextAllowedAt,
+          retryAfter,
         },
       };
     }

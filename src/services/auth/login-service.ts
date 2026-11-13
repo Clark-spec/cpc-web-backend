@@ -11,7 +11,7 @@ export async function loginService(identifier: string, password: string) {
     // Validate User Credentials by Email or Student ID
     const user = await userRepository.findByIdentifier(identifier);
     if (!user || !user.password || !(await bcrypt.compare(password, user.password))) {
-      return { code: 400, status: "error", message: "Invalid credentials" };
+      return { code: 401, status: "error", message: "Incorrect ID or password. Please try again." };
     }
 
     // Generate Access & Refresh Tokens

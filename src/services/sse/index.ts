@@ -43,3 +43,20 @@ export function broadcastComplaintUpdated(
   broadcastToUser(userId, { event: "complaint_updated", data });
 }
 
+/** Owner-only patch for the student's service request list and open detail. */
+export function broadcastServiceRequestUpdated(
+  userId: string,
+  data: {
+    requestId: string;
+    referenceNumber: string;
+    status: string;
+    statusLabel: string;
+    updatedAt: string;
+    remarks: string;
+    timeline: unknown[];
+    historyEntry: unknown | null;
+  },
+) {
+  broadcastToUser(userId, { event: "service_request_updated", data });
+}
+

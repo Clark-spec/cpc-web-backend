@@ -106,11 +106,49 @@ export const serviceRequests = pgTable("service_request", {
   copies: integer().default(1).notNull(),
   purpose: text(),
   notes: text(),
+  attachmentName: text("attachment_name"),
+  attachmentType: text("attachment_type"),
+  attachmentSize: integer("attachment_size"),
+  attachmentData: text("attachment_data"),
   status: text().default("submitted").notNull(),
   remarks: text(),
+  lastUpdatedById: uuid("last_updated_by_id").references(() => users.id, { onDelete: "set null" }),
+  lastUpdatedByRole: text("last_updated_by_role"),
   submittedAt: timestamp("submitted_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
-}, (table) => [index("sr_user_idx").on(table.userId)]);
+}, (table) => [
+  index("sr_user_idx").on(table.userId),
+  index("sr_status_idx").on(table.status),
+  index("sr_submitted_idx").on(table.submittedAt),
+]);
+
+/** One unfinished request per student, replaced every time they save. */
+export const serviceRequestDrafts = pgTable("service_request_draft", {
+  userId: uuid("user_id").primaryKey().references(() => users.id, { onDelete: "cascade" }),
+  serviceId: integer("service_id"),
+  copies: integer().default(1).notNull(),
+  purpose: text(),
+  notes: text(),
+  attachmentName: text("attachment_name"),
+  attachmentType: text("attachment_type"),
+  attachmentSize: integer("attachment_size"),
+  attachmentData: text("attachment_data"),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
+});
+
+/** One row per office action, used by the Request Status timeline. */
+export const serviceRequestHistory = pgTable("service_request_history", {
+  id: uuid().defaultRandom().primaryKey(),
+  requestId: uuid("request_id").notNull().references(() => serviceRequests.id, { onDelete: "cascade" }),
+  oldStatus: text("old_status"),
+  newStatus: text("new_status").notNull(),
+  changedById: uuid("changed_by_id").references(() => users.id, { onDelete: "set null" }),
+  changedByRole: text("changed_by_role"),
+  remarks: text(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  index("srh_request_idx").on(table.requestId, table.createdAt),
+]);
 
 // ─── Complaints ──────────────────────────────────────────────────────────────
 // Identity is intentionally kept out of `complaint`. The private

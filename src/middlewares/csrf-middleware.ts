@@ -62,6 +62,6 @@ export class CsrfMiddleware {
     }
 
     // Reject the request with HTTP 403 if the CSRF token is missing or invalid.
-    return res.status(403).json({ code: 403, status: "error", message: "Invalid or missing CSRF token" });
+    return res.status(403).json({ success: false, code: 403, status: "error", message: "Your security token expired. Please refresh the page and try again." });
   }
 }

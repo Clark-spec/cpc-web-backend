@@ -12,9 +12,10 @@ export class SubmitRateLimiter {
     const userId = (req as AuthenticatedRequest).user?.sub;
     if (!userId) {
       return res.status(401).json({
+        success: false,
         code: 401,
         status: "error",
-        message: "Authentication required",
+        message: "Please sign in to continue.",
       });
     }
 
@@ -27,10 +28,14 @@ export class SubmitRateLimiter {
 
     if (recent.length >= max) {
       const retryAt = new Date(recent[0] + windowMs).toISOString();
+      const retryAfter = Math.max(1, Math.ceil((recent[0] + windowMs - now) / 1000));
+      res.setHeader("Retry-After", String(retryAfter));
       return res.status(429).json({
+        success: false,
         code: 429,
         status: "error",
-        message: "Too many attempts. Please try again later.",
+        message: "Too many attempts. Please try again in a few minutes.",
+        retryAfter,
         data: { canSubmit: false, nextAllowedAt: retryAt },
       });
     }

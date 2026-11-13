@@ -19,17 +19,19 @@ export class RoleValidatorMiddleware {
 
       if (!user || user.type !== "access") {
         return res.status(401).json({
+          success: false,
           code: 401,
           status: "error",
-          message: "Authentication required",
+          message: "Please sign in to continue.",
         });
       }
   
       if (!allowedRoles.some((role) => role === user.role)) {
         return res.status(403).json({
+          success: false,
           code: 403,
           status: "error",
-          message: "You are not authorized to access this resource.",
+          message: "You do not have access to this section.",
         });
       }
 

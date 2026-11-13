@@ -46,20 +46,47 @@ app.use("/api", routes);
 // --- 404 Handler ---
 app.use((req: Request, res: Response) => {
   res.status(404).json({
+    success: false,
+    code: 404,
     status: "error",
-    message: `Cannot ${req.method} ${req.originalUrl}`
+    message: "The requested resource could not be found."
   });
 });
 
 // --- Global Error Handler ---
-app.use((err: any, req: Request, res: Response, _next: NextFunction) => {
-  console.error("🔥 Global Error Hook:", err.message);
-  
-  const statusCode = err.status || 500;
+// Never leak stack traces, SQL, or internal details to the client. The full
+// error is logged server-side only (request bodies, passwords and tokens are
+// never attached to `err` by the handlers above).
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error("🔥 Global Error Hook:", err);
+
+  if (err?.type === "entity.too.large" || err?.status === 413) {
+    return res.status(413).json({
+      success: false,
+      code: 413,
+      status: "error",
+      message: "That file or request is too large. Please use a smaller file."
+    });
+  }
+
+  if (err?.type === "entity.parse.failed" || err?.status === 400) {
+    return res.status(400).json({
+      success: false,
+      code: 400,
+      status: "error",
+      message: "We could not read that request. Please refresh and try again."
+    });
+  }
+
+  const statusCode = Number(err?.status) >= 400 && Number(err?.status) < 500 ? Number(err.status) : 500;
   res.status(statusCode).json({
+    success: false,
+    code: statusCode,
     status: "error",
-    message: ENV.NODE_ENV === "production" ? "Internal Server Error" : err.message,
-    ...(ENV.NODE_ENV !== "production" && { stack: err.stack })
+    message:
+      statusCode < 500
+        ? "The request could not be completed."
+        : "The service is temporarily unavailable. Please try again."
   });
 });
 

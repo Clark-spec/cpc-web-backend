@@ -1,19 +1,20 @@
 ﻿import { Request, Response } from "express";
 import { signupService, loginService, refreshTokenService, logoutService, getUserSessionService, getCsrfTokenService } from "@/services/auth";
 import { setAuthCookies, clearAuthCookies } from "@/lib/auth-cookies";
+import { sendResult } from "@/lib/api-response";
 
 export class AuthController {
   // Get CSRF Token Function Controller
   public getCsrfToken = (req: Request, res: Response) => {
     const result = getCsrfTokenService(req, res);
-    return res.status(result.code).json(result);
+    return sendResult(res, result);
   };
 
   // Signup Function Controller
   public signup = async (req: Request, res: Response) => {
     const { name, email, password } = req.body ?? {};
     const result = await signupService(name, email, password);
-    return res.status(result.code).json(result);
+    return sendResult(res, result);
   };
 
   // Login Function Controller
@@ -27,7 +28,7 @@ export class AuthController {
       setAuthCookies(res, { accessToken: result.data.accessToken, refreshToken: result.data.refreshToken });
     }
 
-    return res.status(result.code).json(result);
+    return sendResult(res, result);
   };
 
   // Refresh Token Function Controller
@@ -40,7 +41,7 @@ export class AuthController {
       setAuthCookies(res, { accessToken: result.data.accessToken, refreshToken: result.data.refreshToken });
     }
 
-    return res.status(result.code).json(result);
+    return sendResult(res, result);
   };
 
   // Logout Function Controller
@@ -50,13 +51,13 @@ export class AuthController {
     if (result.code === 200) {
       clearAuthCookies(res);
     }
-    return res.status(result.code).json(result);
+    return sendResult(res, result);
   };
 
   // Get Current User Session
   public userSession = async (req: Request, res: Response) => {
     const userId = (req as any).user?.sub;
     const result = await getUserSessionService(userId);
-    return res.status(result.code).json(result);
+    return sendResult(res, result);
   };
 }

@@ -20,13 +20,13 @@ export class AuthMiddleware {
     }
 
     if (!accessToken) {
-      return res.status(401).json({ code: 401, status: "error", message: "Authentication required" });
+      return res.status(401).json({ success: false, code: 401, status: "error", message: "Please sign in to continue." });
     }
 
     // 3. Verify token
     const payload = verifyAccessToken(accessToken);
     if (!payload) {
-      return res.status(401).json({ code: 401, status: "error", message: "Invalid or expired token" });
+      return res.status(401).json({ success: false, code: 401, status: "error", message: "Your session has expired. Please sign in again." });
     }
 
     // 4. Attach user to request
