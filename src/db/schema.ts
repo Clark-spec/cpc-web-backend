@@ -185,6 +185,39 @@ export const complaintSubmitters = pgTable("complaint_submitter", {
   index("complaint_submitter_user_idx").on(table.userId, table.createdAt),
 ]);
 
+// ─── Academic Calendar ───────────────────────────────────────────────────────
+
+export const academicEvents = pgTable("academic_event", {
+  id: uuid().defaultRandom().primaryKey(),
+  title: text().notNull(),
+  description: text().default("").notNull(),
+  category: text().notNull(),
+  /** Inclusive calendar dates, `YYYY-MM-DD`. */
+  startDate: text("start_date").notNull(),
+  endDate: text("end_date"),
+  /** 24-hour clock, e.g. `"08:00"`. */
+  startTime: text("start_time"),
+  endTime: text("end_time"),
+  allDay: boolean("all_day").default(false).notNull(),
+  schoolYear: text("school_year").notNull(),
+  semester: text().notNull(),
+  status: text().default("draft").notNull(), // draft | pending | published | archived | cancelled
+  location: text(),
+  organizer: text(),
+  department: text(),
+  notes: text(),
+  programs: text().array().notNull(),
+  targetAudience: text("target_audience"),
+  createdById: uuid("created_by_id").references(() => users.id, { onDelete: "set null" }),
+  createdByRole: text("created_by_role"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
+}, (table) => [
+  index("academic_event_start_idx").on(table.startDate),
+  index("academic_event_status_idx").on(table.status),
+  index("academic_event_year_semester_idx").on(table.schoolYear, table.semester),
+]);
+
 export const notifications = pgTable("notification", {
   id: uuid().defaultRandom().primaryKey(),
   userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),

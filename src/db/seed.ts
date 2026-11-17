@@ -1,7 +1,8 @@
 ﻿import bcrypt from "bcrypt";
 import { eq } from "drizzle-orm";
 import { db } from "@/db";
-import { users } from "@/db/schema";
+import { academicEvents, users } from "@/db/schema";
+import { SEED_ACADEMIC_EVENTS } from "@/db/academic-event-seed";
 
 async function seed() {
   console.log("🌱 Seeding CPC initial accounts...");
@@ -114,6 +115,25 @@ async function seed() {
   }
 
   console.log("✨ Seeding completed successfully!");
+
+  await db
+    .insert(academicEvents)
+    .values(
+      SEED_ACADEMIC_EVENTS.map((event) => ({
+        ...event,
+        endDate: event.endDate ?? null,
+        startTime: event.startTime ?? null,
+        endTime: event.endTime ?? null,
+        location: event.location ?? null,
+        organizer: event.organizer ?? null,
+        department: event.department ?? null,
+        notes: event.notes ?? null,
+        targetAudience: event.targetAudience ?? null,
+      })),
+    )
+    .onConflictDoNothing();
+  console.log(`🎓 Academic calendar events available (${SEED_ACADEMIC_EVENTS.length} samples).`);
+
   process.exit(0);
 }
 

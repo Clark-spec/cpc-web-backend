@@ -7,6 +7,7 @@ import scheduleRoutes from "@/routes/schedule-routes";
 import sseRoutes from "@/routes/sse-routes";
 import notificationRoutes from "@/routes/notification-routes";
 import complaintRoutes from "@/routes/complaint-routes";
+import academicCalendarRoutes from "@/routes/academic-calendar-routes";
 
 const router = Router();
 
@@ -18,6 +19,7 @@ router.use("/service-requests", serviceRequestRoutes);
 router.use("/schedules", scheduleRoutes);
 router.use("/notifications", notificationRoutes);
 router.use("/complaints", complaintRoutes);
+router.use("/academic-calendar", academicCalendarRoutes);
 router.use("/sse", sseRoutes);
 
 export default router;

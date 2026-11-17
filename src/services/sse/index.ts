@@ -43,6 +43,14 @@ export function broadcastComplaintUpdated(
   broadcastToUser(userId, { event: "complaint_updated", data });
 }
 
+/** Tells the student calendar to pull the latest published events. */
+export function broadcastAcademicCalendarUpdated(
+  userId: string,
+  data: { eventId: string; action: "created" | "updated" | "removed" },
+) {
+  broadcastToUser(userId, { event: "academic_calendar_updated", data });
+}
+
 /** Owner-only patch for the student's service request list and open detail. */
 export function broadcastServiceRequestUpdated(
   userId: string,
