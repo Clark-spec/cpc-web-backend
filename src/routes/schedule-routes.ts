@@ -9,4 +9,7 @@ const scheduleController = new ScheduleController();
 // GET /api/schedules/v1/published
 router.get("/v1/published", authMiddleware.execute, scheduleController.getPublished);
 
+// POST /api/schedules/v1/publish
+router.post("/v1/publish", authMiddleware.execute, scheduleController.publish);
+
 export default router;
