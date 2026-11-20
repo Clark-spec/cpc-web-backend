@@ -10,6 +10,8 @@ export const role = pgEnum("Role", [
   "ACCOUNTING",
   "SAO",
   "INSTRUCTOR",
+  "GUIDANCE",
+  "CLINIC",
 ]);
 
 export const tokenType = pgEnum("TokenType", ["REFRESH", "EMAIL_VERIFY"]);
@@ -232,5 +234,131 @@ export const notifications = pgTable("notification", {
 }, (table) => [
   index("notification_user_idx").on(table.userId),
   index("notification_user_read_created_idx").on(table.userId, table.read, table.createdAt),
+]);
+
+// ─── Online Enrollment (Continuing Students - Spec Section 5) ───────────────
+
+export const masterlist = pgTable("masterlist", {
+  id: uuid().defaultRandom().primaryKey(),
+  studentIdNo: text("student_id_no").unique().notNull(),
+  name: text().notNull(),
+  department: text().notNull(),
+  course: text().notNull(),
+  yearLevel: integer("year_level").notNull(),
+  semester: integer().default(1).notNull(),
+  standing: text().default("regular").notNull(), // "regular" | "irregular"
+  lastTermEnrolled: text("last_term_enrolled").notNull(),
+  isEligible: boolean("is_eligible").default(true).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  index("masterlist_student_id_idx").on(table.studentIdNo),
+  index("masterlist_dept_idx").on(table.department),
+]);
+
+export const enrollmentForms = pgTable("enrollment_form", {
+  id: text().primaryKey(),
+  studentId: text("student_id").notNull(),
+  studentName: text("student_name").notNull(),
+  department: text().notNull(),
+  course: text().notNull(),
+  yearLevel: integer("year_level").notNull(),
+  term: text().notNull(),
+  type: text().notNull(), // "preprinted" | "blank"
+  standing: text().notNull(), // "regular" | "irregular"
+  totalUnits: integer("total_units").default(0).notNull(),
+  status: text().default("DRAFT").notNull(), // "DRAFT" | "SUBMITTED" | "APPROVED" | "RESUBMIT"
+  approvedBy: text("approved_by"),
+  screeningRemarks: text("screening_remarks"),
+  guidanceRemarks: text("guidance_remarks"),
+  submittedAt: timestamp("submitted_at", { withTimezone: true, mode: "string" }),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  index("enr_form_student_idx").on(table.studentId),
+  index("enr_form_status_idx").on(table.status),
+]);
+
+export const formSubjects = pgTable("form_subject", {
+  id: text().primaryKey(),
+  formId: text("form_id").notNull().references(() => enrollmentForms.id, { onDelete: "cascade" }),
+  code: text().notNull(),
+  title: text().notNull(),
+  units: integer().notNull(),
+  schedule: text().notNull(),
+  room: text(),
+  instructor: text(),
+}, (table) => [
+  index("form_subj_form_idx").on(table.formId),
+]);
+
+export const workflowSteps = pgTable("workflow_step", {
+  id: uuid().defaultRandom().primaryKey(),
+  studentId: text("student_id").notNull(),
+  stepName: text("step_name").notNull(),
+  office: text().notNull(),
+  status: text().default("LOCKED").notNull(), // "LOCKED" | "PENDING" | "APPROVED" | "REJECTED" | "RESUBMIT"
+  updatedBy: text("updated_by"),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }),
+  remarks: text(),
+}, (table) => [
+  index("wf_student_idx").on(table.studentId),
+  index("wf_step_idx").on(table.stepName),
+]);
+
+export const departmentSchedules = pgTable("department_schedule", {
+  id: text().primaryKey(),
+  department: text().notNull(),
+  term: text().notNull(),
+  date: text().notNull(), // YYYY-MM-DD
+  yearGroup: text("year_group").notNull(), // "1-2" | "3-4"
+  startTime: text("start_time").notNull(),
+  endTime: text("end_time").notNull(),
+  slots: integer().default(100).notNull(),
+  remainingSlots: integer("remaining_slots").default(100).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+});
+
+export const queueTickets = pgTable("queue_ticket", {
+  id: text().primaryKey(),
+  studentId: text("student_id").notNull(),
+  studentName: text("student_name").notNull(),
+  department: text().notNull(),
+  yearLevel: integer("year_level").notNull(),
+  yearGroup: text("year_group").notNull(),
+  number: text().notNull(), // e.g. "BSIT-001"
+  scheduleDate: text("schedule_date").notNull(),
+  timeBlock: text("time_block").notNull(),
+  issuedAt: timestamp("issued_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  index("queue_number_idx").on(table.number),
+  index("queue_dept_idx").on(table.department),
+]);
+
+export const queueOfficeStatus = pgTable("queue_office_status", {
+  id: uuid().defaultRandom().primaryKey(),
+  ticketId: text("ticket_id").notNull().references(() => queueTickets.id, { onDelete: "cascade" }),
+  office: text().notNull(), // "clinic" | "accounting" | "registrar"
+  status: text().default("WAITING").notNull(), // "WAITING" | "CALLED" | "SERVING" | "DONE" | "MOVED_TO_LAST"
+  recalls: integer().default(0).notNull(),
+  position: integer().default(1).notNull(),
+  servedBy: text("served_by"),
+  calledAt: timestamp("called_at", { withTimezone: true, mode: "string" }),
+  doneAt: timestamp("done_at", { withTimezone: true, mode: "string" }),
+}, (table) => [
+  index("queue_office_ticket_idx").on(table.ticketId, table.office),
+  index("queue_office_status_idx").on(table.office, table.status),
+]);
+
+export const auditLogs = pgTable("audit_log", {
+  id: text().primaryKey(),
+  actorId: text("actor_id").notNull(),
+  actorName: text("actor_name").notNull(),
+  actorRole: text("actor_role").notNull(),
+  action: text().notNull(),
+  target: text().notNull(),
+  remarks: text(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [
+  index("audit_created_idx").on(table.createdAt),
 ]);
 
