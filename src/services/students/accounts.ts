@@ -58,6 +58,7 @@ export async function createStudentAccountService(name: string, section: string)
         defaultPassword: DEFAULT_PASSWORD,
         continuingRecord: {
           studentIdNo: studentNumber,
+          section: section.trim(),
           name: name.trim(),
           department,
           course,

@@ -71,6 +71,13 @@
       "when": 1795300000000,
       "tag": "0009_persistent_enrollment_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1795293272285,
+      "tag": "0010_staff_signatures",
+      "breakpoints": true
     }
   ]
 }

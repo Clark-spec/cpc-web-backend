@@ -1,7 +1,82 @@
-import { eq, and, desc, count } from "drizzle-orm";
+import { eq, and, desc, count, inArray, gte } from "drizzle-orm";
 import { db } from "@/db";
-import { notifications } from "@/db/schema";
+import { enrollmentSessions, notifications, users } from "@/db/schema";
 import { randomUUID } from "node:crypto";
+
+const clearanceLabels: Record<string, string> = {
+  dean: "Dean",
+  sao: "SAO / SSG Adviser",
+  library: "Library",
+  accounting: "Accounting",
+  registrar: "Registrar",
+};
+const clearanceReconcileAt = new Map<string, number>();
+
+async function reconcileClearanceNotifications(userId: string) {
+  const now = Date.now();
+  if (now - (clearanceReconcileAt.get(userId) ?? 0) < 15_000) return;
+  clearanceReconcileAt.set(userId, now);
+  try {
+    const [recipient] = await db.select({ role: users.role, studentNumber: users.studentNumber })
+      .from(users).where(eq(users.id, userId)).limit(1);
+    const titles = Object.values(clearanceLabels).flatMap((label) => [
+      `Clearance request: ${label}`,
+      `Clearance pending: ${label}`,
+      `Clearance signed: ${label}`,
+      `Clearance rejected: ${label}`,
+    ]);
+    const owned = await db.select().from(notifications).where(and(
+      eq(notifications.userId, userId),
+      inArray(notifications.title, titles),
+    ));
+    const studentIds = recipient?.role === "STUDENT" && recipient.studentNumber
+      ? [recipient.studentNumber]
+      : [...new Set(owned.map((item) => item.message.match(/\((\d{8})\)/)?.[1]).filter((id): id is string => Boolean(id)))];
+    if (!studentIds.length) return;
+    const sessions = await db.select({ studentId: enrollmentSessions.studentId, session: enrollmentSessions.session })
+      .from(enrollmentSessions).where(inArray(enrollmentSessions.studentId, studentIds));
+    for (const row of sessions) {
+      const session = row.session as Record<string, any>;
+      const clearance = session.clearance as Record<string, any> | undefined;
+      const offices = Array.isArray(clearance?.offices) ? clearance.offices as Record<string, any>[] : [];
+      const studentName = String(clearance?.studentName ?? session.student?.name ?? "Student");
+      for (const officeState of offices) {
+        const officeId = String(officeState.office ?? "");
+        const label = clearanceLabels[officeId];
+        const requestedAt = officeState.requestedAt as string | undefined;
+        const status = officeState.status === "requested" ? "pending" : officeState.status;
+        if (!label || !requestedAt || !["pending", "signed", "rejected"].includes(status)) continue;
+        const current = owned.filter((item) => {
+          if (item.officeId !== officeId || Date.parse(item.createdAt) < Date.parse(requestedAt)) return false;
+          if (recipient?.role === "STUDENT") return true;
+          return item.message.includes(`(${row.studentId})`);
+        });
+        if (!current.length) continue;
+        const title = `Clearance ${status}: ${label}`;
+        const isStudent = recipient?.role === "STUDENT";
+        const message = status === "pending"
+          ? isStudent
+            ? `Your ${label} clearance request was sent and is pending review.`
+            : `${studentName} (${row.studentId}) has a pending clearance signature request.`
+          : isStudent
+            ? `Your ${label} clearance request was ${status}.`
+            : `${studentName} (${row.studentId}) clearance request was ${status}.`;
+        const type = status === "signed" ? "success" : status === "rejected" ? "warning" : "info";
+        const canonical = current.find((item) => item.title?.startsWith("Clearance pending:")) ?? current[0];
+        const contentChanged = canonical.title !== title || canonical.message !== message || canonical.type !== type;
+        if (contentChanged) {
+          await db.update(notifications).set({ title, message, type, read: false, readAt: null })
+            .where(eq(notifications.id, canonical.id));
+        }
+        const duplicateIds = current.filter((item) => item.id !== canonical.id).map((item) => item.id);
+        if (duplicateIds.length) await db.delete(notifications).where(inArray(notifications.id, duplicateIds));
+      }
+    }
+  } catch (error) {
+    clearanceReconcileAt.delete(userId);
+    console.error("Could not reconcile clearance notifications", error);
+  }
+}
 
 export type NotificationType = "info" | "success" | "warning";
 
@@ -68,6 +143,7 @@ export class NotificationRepository {
     const offset = Math.max(0, options.offset);
 
     try {
+      await reconcileClearanceNotifications(userId);
       const [rows, [unreadRow], [totalRow]] = await Promise.all([
         db
           .select()

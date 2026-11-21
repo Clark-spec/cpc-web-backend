@@ -60,6 +60,17 @@ export const tokens = pgTable("token", {
   userId: uuid().notNull().references(() => users.id, { onDelete: "cascade" }),
 }, (table) => [index("token_owner_type_idx").on(table.userId, table.type)]);
 
+/** Reusable digital signatures are private to the staff account that saved them. */
+export const staffSignatures = pgTable("staff_signature", {
+  id: uuid().defaultRandom().primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  label: text().notNull(),
+  imageBase64: text("image_base64").notNull(),
+  method: text().notNull(),
+  isDefault: boolean("is_default").default(false).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [index("staff_signature_owner_idx").on(table.userId, table.createdAt)]);
+
 // ─── Student Profile ─────────────────────────────────────────────────────────
 
 export const studentProfiles = pgTable("student_profile", {

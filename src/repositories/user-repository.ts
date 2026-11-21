@@ -242,6 +242,34 @@ const memContinuingRecords: Array<{
 }> = [];
 
 export class UserRepository {
+  /**
+   * The demonstration staff sign-in can authenticate a fallback role account
+   * from memory. Clearance notifications need a durable user row, however,
+   * because the feed is scoped to `user_id` in the database. If a role has no
+   * provisioned account yet, persist its existing demo account before routing
+   * the request. Real accounts always take precedence.
+   */
+  async ensureDemoStaffAccountsForRole(roleName: string) {
+    const typedRole = roleName as (typeof role.enumValues)[number];
+    const fallbackAccounts = memUsers.filter(
+      (user) => user.role === roleName && user.role !== "STUDENT" && user.email,
+    );
+    for (const account of fallbackAccounts) {
+      const [existing] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, account.email!.toLowerCase()))
+        .limit(1);
+      if (existing) continue;
+      await db.insert(users).values(account).onConflictDoNothing();
+    }
+
+    return db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.role, typedRole));
+  }
+
   async findById(id: string) {
     try {
       const [user] = await db.select(publicUserFields).from(users).where(eq(users.id, id)).limit(1);
@@ -412,10 +440,10 @@ export class UserRepository {
 
   async findContinuingRecordByUserId(userId: string) {
     try {
-      const [user] = await db.select({ studentNumber: users.studentNumber }).from(users).where(eq(users.id, userId)).limit(1);
+      const [user] = await db.select({ studentNumber: users.studentNumber, section: users.section }).from(users).where(eq(users.id, userId)).limit(1);
       if (!user?.studentNumber) return null;
       const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, user.studentNumber)).limit(1);
-      return record ?? null;
+      return record ? { ...record, section: user.section ?? "" } : null;
     } catch {
       const user = memUsers.find((entry) => entry.id === userId);
       if (!user?.studentNumber) return null;
