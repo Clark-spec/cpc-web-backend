@@ -20,7 +20,7 @@ const submitRateLimiter = new SubmitRateLimiter();
 const complaintController = new ComplaintController();
 
 // Staff roles that own Student Support > Complaints.
-const complaintAdmins = roleValidator.validate("ADMIN", "REGISTRAR", "DEAN", "SAO");
+const complaintAdmins = roleValidator.validate("ADMIN", "REGISTRAR", "DEAN", "SAO", "ACCOUNTING", "CLINIC");
 const studentOnly = roleValidator.validate("STUDENT");
 
 // Student: own complaint list + cooldown state.

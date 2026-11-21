@@ -26,7 +26,7 @@ export const getProfileService = async (userId: string) => {
           fullName: user.name,
           program: user.course ?? "",
           yearLevel: user.yearLevel ?? null,
-          section: "",
+          section: user.section ?? "",
           enrollmentStatus: "Enrolled",
           avatarUrl: user.avatarUrl ?? null,
           email: user.email,

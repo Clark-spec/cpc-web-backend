@@ -20,9 +20,6 @@ const requestRepo = new ServiceRequestRepository();
 const userRepo = new UserRepository();
 const notificationRepo = new NotificationRepository();
 
-/** Staff roles that own Student Services > Service Requests. */
-const SERVICE_REQUEST_ADMIN_ROLES = ["ADMIN", "REGISTRAR", "DEAN", "SAO"];
-
 const STAGE_KEYS: Exclude<ServiceRequestStatus, "rejected">[] = [
   "submitted",
   "under_review",
@@ -153,23 +150,29 @@ function toAdminDto(req: any, history?: any[]) {
   };
 }
 
-/** Bell alert for every office that handles service requests. */
+/** Document requests go to the Registrar; the Administrator has the global feed. */
 async function notifyAdminsOfNewRequest(referenceNumber: string, serviceName: string) {
   try {
-    const adminIds = await userRepo.findIdsByRoles(SERVICE_REQUEST_ADMIN_ROLES);
-    if (adminIds.length === 0) return;
+    const [adminIds, registrarIds] = await Promise.all([
+      userRepo.findIdsByRoles(["ADMIN"]),
+      userRepo.findIdsByRoles(["REGISTRAR"]),
+    ]);
+    const recipients = [
+      ...adminIds.map((id) => ({ id, targetRole: "admin" })),
+      ...registrarIds.map((id) => ({ id, targetRole: "registrar" })),
+    ];
+    if (recipients.length === 0) return;
 
-    await Promise.all(
-      adminIds.map((adminId) =>
-        notificationRepo.create(adminId, {
+    await Promise.all(recipients.map(({ id, targetRole }) =>
+        notificationRepo.create(id, {
           title: "New Service Request",
           message: `New service request ${referenceNumber} (${serviceName}) was submitted.`,
           type: "info",
+          officeId: targetRole,
           href: "/admin/service-requests",
         }),
-      ),
-    );
-    adminIds.forEach((adminId) => broadcastNotificationUpdated(adminId));
+    ));
+    recipients.forEach(({ id }) => broadcastNotificationUpdated(id));
   } catch (error) {
     console.error("notifyAdminsOfNewRequest Error:", error);
   }
@@ -456,6 +459,20 @@ export const createRequestService = async (
     void requestRepo.deleteDraftByUserId(userId).catch(() => {});
 
     void notifyAdminsOfNewRequest(full?.referenceNumber ?? result.request.referenceNumber, svc.name);
+    const studentNotification = await notificationRepo.create(userId, {
+      title: "Service Request Submitted",
+      message: `Your ${svc.name} request has been submitted and is awaiting review.`,
+      type: "info",
+      href: `/student/request-status?request=${encodeURIComponent(result.request.id)}`,
+    });
+    broadcastNotificationCreated(userId, {
+      id: studentNotification.id,
+      title: studentNotification.title ?? null,
+      message: studentNotification.message,
+      type: studentNotification.type,
+      href: studentNotification.href ?? null,
+      createdAt: studentNotification.createdAt,
+    });
     // Other tabs of the same student refresh their list without a page reload.
     broadcastToUser(userId, {
       event: "service_request_updated",

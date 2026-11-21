@@ -18,9 +18,8 @@ const roleValidator = new RoleValidatorMiddleware();
 const schemaMiddleware = new SchemaMiddleware();
 const serviceRequestController = new ServiceRequestController();
 
-// Student Services > Service Requests is shared by the same office roles as
-// Student Support > Complaints.
-const serviceRequestAdmins = roleValidator.validate("ADMIN", "REGISTRAR", "DEAN", "SAO");
+// Service requests are handled by Registrar; ADMIN retains the full queue.
+const serviceRequestAdmins = roleValidator.validate("ADMIN", "REGISTRAR");
 const studentOnly = roleValidator.validate("STUDENT");
 
 // GET /api/service-requests/v1/catalog — public

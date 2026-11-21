@@ -1,6 +1,6 @@
-import { eq, or, inArray } from "drizzle-orm";
+import { eq, or, inArray, and } from "drizzle-orm";
 import { db } from "@/db";
-import { users, role } from "@/db/schema";
+import { users, role, masterlist } from "@/db/schema";
 import type { SignupInput } from "@/schema/auth-schema";
 import { randomUUID } from "node:crypto";
 
@@ -9,6 +9,8 @@ export const publicUserFields = {
   id: users.id,
   name: users.name,
   email: users.email,
+  section: users.section,
+  mustChangePassword: users.mustChangePassword,
   role: users.role,
   studentNumber: users.studentNumber,
   course: users.course,
@@ -23,10 +25,12 @@ export const publicUserFields = {
 type FallbackUser = {
   id: string;
   name: string;
-  email: string;
+  email: string | null;
   password: string;
   role: any;
   studentNumber?: string | null;
+  section?: string | null;
+  mustChangePassword?: boolean;
   course?: string | null;
   yearLevel?: number | null;
   department?: string | null;
@@ -225,6 +229,18 @@ export const memUsers: FallbackUser[] = [
   },
 ];
 
+const memContinuingRecords: Array<{
+  studentIdNo: string;
+  name: string;
+  department: string;
+  course: string;
+  yearLevel: number;
+  semester: number;
+  standing: "regular";
+  lastTermEnrolled: string;
+  isEligible: boolean;
+}> = [];
+
 export class UserRepository {
   async findById(id: string) {
     try {
@@ -256,6 +272,20 @@ export class UserRepository {
     }
   }
 
+  async findIdsByRoleAndDepartment(roleName: string, department: string) {
+    try {
+      const rows = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(and(eq(users.role, roleName as (typeof role.enumValues)[number]), eq(users.department, department)));
+      return rows.map((row) => row.id);
+    } catch {
+      return memUsers
+        .filter((user) => user.role === roleName && user.department === department)
+        .map((user) => user.id);
+    }
+  }
+
   async findByEmail(email: string) {
     const cleanEmail = email.toLowerCase().trim();
     try {
@@ -269,7 +299,7 @@ export class UserRepository {
       // Fall through to memory
     }
 
-    return memUsers.find((u) => u.email.toLowerCase() === cleanEmail) ?? null;
+    return memUsers.find((u) => u.email?.toLowerCase() === cleanEmail) ?? null;
   }
 
   async findByIdentifier(identifier: string) {
@@ -293,10 +323,131 @@ export class UserRepository {
     return (
       memUsers.find(
         (u) =>
-          u.email.toLowerCase() === cleaned.toLowerCase() ||
+          u.email?.toLowerCase() === cleaned.toLowerCase() ||
           (u.studentNumber && u.studentNumber.toLowerCase() === cleaned.toLowerCase())
       ) ?? null
     );
+  }
+
+  async listStudents() {
+    const rows = await db.select({
+      id: users.id,
+      name: users.name,
+      studentNumber: users.studentNumber,
+      section: users.section,
+      course: masterlist.course,
+      yearLevel: masterlist.yearLevel,
+    })
+      .from(users)
+      .leftJoin(masterlist, eq(masterlist.studentIdNo, users.studentNumber))
+      .where(eq(users.role, "STUDENT"))
+      .orderBy(users.studentNumber);
+
+    // Registrar-created accounts use the numeric ID sequence. Keep seeded/demo
+    // student logins out of the operational Registrar directory.
+    return rows.filter((student) => {
+      const id = student.studentNumber ?? "";
+      return /^\d{8}$/.test(id) && Number(id) >= 20240770;
+    });
+  }
+
+  async createRegistrarStudent(input: {
+    name: string;
+    studentNumber: string;
+    section: string;
+    password: string;
+    department: string;
+    course: string;
+    yearLevel: number;
+    lastTermEnrolled: string;
+  }) {
+    const values = {
+      name: input.name,
+      studentNumber: input.studentNumber,
+      section: input.section,
+      email: null,
+      password: input.password,
+      role: "STUDENT" as const,
+      mustChangePassword: true,
+    };
+    // Registrar accounts must be durable. Never report success for a memory-only
+    // student account that disappears when the API process restarts.
+    return db.transaction(async (tx) => {
+      const [user] = await tx.insert(users).values(values).returning(publicUserFields);
+      if (!user) return null;
+      await tx.insert(masterlist).values({
+        studentIdNo: input.studentNumber,
+        name: input.name,
+        department: input.department,
+        course: input.course,
+        yearLevel: input.yearLevel,
+        semester: 2,
+        standing: "regular",
+        lastTermEnrolled: input.lastTermEnrolled,
+        isEligible: true,
+      });
+      return user;
+    });
+  }
+
+  async deleteRegistrarStudent(userId: string) {
+    return db.transaction(async (tx) => {
+      const [student] = await tx.select({
+        id: users.id,
+        studentNumber: users.studentNumber,
+      })
+        .from(users)
+        .where(and(eq(users.id, userId), eq(users.role, "STUDENT")))
+        .limit(1);
+
+      if (!student?.studentNumber || !/^\d{8}$/.test(student.studentNumber) || Number(student.studentNumber) < 20240770) {
+        return false;
+      }
+
+      await tx.delete(masterlist).where(eq(masterlist.studentIdNo, student.studentNumber));
+      const [deleted] = await tx.delete(users).where(eq(users.id, student.id)).returning({ id: users.id });
+      return Boolean(deleted);
+    });
+  }
+
+  async findContinuingRecordByUserId(userId: string) {
+    try {
+      const [user] = await db.select({ studentNumber: users.studentNumber }).from(users).where(eq(users.id, userId)).limit(1);
+      if (!user?.studentNumber) return null;
+      const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, user.studentNumber)).limit(1);
+      return record ?? null;
+    } catch {
+      const user = memUsers.find((entry) => entry.id === userId);
+      if (!user?.studentNumber) return null;
+      return memContinuingRecords.find((record) => record.studentIdNo === user.studentNumber) ?? null;
+    }
+  }
+
+  async findByIdWithPassword(id: string) {
+    try {
+      const [user] = await db.select().from(users).where(eq(users.id, id)).limit(1);
+      if (user) return user;
+    } catch {
+      // Fall through to the development memory store.
+    }
+    return memUsers.find((user) => user.id === id) ?? null;
+  }
+
+  async updatePassword(id: string, password: string) {
+    try {
+      const [user] = await db.update(users).set({ password, mustChangePassword: false }).where(eq(users.id, id)).returning(publicUserFields);
+      if (user) return user;
+    } catch {
+      // Fall through to the development memory store.
+    }
+    const user = memUsers.find((entry) => entry.id === id);
+    if (!user) return null;
+    user.password = password;
+    user.mustChangePassword = false;
+    user.updatedAt = new Date().toISOString();
+    const { password: _password, ...publicUser } = user;
+    void _password;
+    return publicUser;
   }
 
   async create(data: SignupInput & { role?: any }) {

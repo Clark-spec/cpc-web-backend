@@ -10,7 +10,9 @@ export type Role =
   | "LIBRARY"
   | "ACCOUNTING"
   | "SAO"
-  | "INSTRUCTOR";
+  | "INSTRUCTOR"
+  | "CLINIC"
+  | "GUIDANCE";
 
 export class RoleValidatorMiddleware {
   public validate = (...allowedRoles: Role[]) => {

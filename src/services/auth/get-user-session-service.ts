@@ -25,6 +25,8 @@ export const getUserSessionService = async (userId: string) => {
           department: user.department,
           avatarUrl: user.avatarUrl,
           phone: user.phone,
+          section: user.section,
+          mustChangePassword: user.mustChangePassword ?? false,
           emailVerified: user.emailVerified,
           createdAt: user.createdAt,
         },

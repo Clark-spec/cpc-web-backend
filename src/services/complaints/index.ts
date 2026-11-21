@@ -121,9 +121,6 @@ function cooldownState(lastSubmittedAt: string | null) {
   };
 }
 
-/** Staff roles that receive new-complaint alerts in the admin bell. */
-const COMPLAINT_ADMIN_ROLES = ["ADMIN", "REGISTRAR", "DEAN", "SAO"];
-
 /**
  * Drops an update into the submitter's bell and pings their open tabs.
  * The text carries only the reference and status — never a name, course or
@@ -198,30 +195,72 @@ async function notifyStudentOfUpdate(
 /** Bell alert for every complaint-handling admin. Identity-free by design. */
 async function notifyAdminsOfNewComplaint(
   complaint:
-    | { referenceNumber?: string; isAnonymous?: boolean }
+    | { referenceNumber?: string; isAnonymous?: boolean; category?: string; program?: string | null }
     | null
     | undefined,
 ) {
   try {
-    const adminIds = await userRepo.findIdsByRoles(COMPLAINT_ADMIN_ROLES);
-    if (adminIds.length === 0) return;
-
+    const adminIds = await userRepo.findIdsByRoles(["ADMIN"]);
     const reference = complaint?.referenceNumber ?? "a new complaint";
     const message = complaint?.isAnonymous
       ? `A new anonymous complaint ${reference} was submitted.`
       : `A new complaint ${reference} was submitted.`;
 
-    await Promise.all(
-      adminIds.map((adminId) =>
-        notificationRepo.create(adminId, {
+    let targetRole: string | null = null;
+    let officeIds: string[] = [];
+    switch (complaint?.category) {
+      case "Academic Concern": {
+        const course = (complaint.program ?? "").toLowerCase();
+        const department = course.includes("hospital")
+          ? "College of Hospitality Management"
+          : course.includes("elementary") || course.includes("teacher")
+            ? "College of Teacher Education"
+            : course.includes("information") || course.includes("computer") || course.includes("bsit")
+              ? "College of Computer Studies"
+              : null;
+        if (department) {
+          targetRole = department === "College of Computer Studies"
+            ? "dean_cs"
+            : department === "College of Teacher Education" ? "dean_edu" : "dean_hm";
+          officeIds = await userRepo.findIdsByRoleAndDepartment("DEAN", department);
+        }
+        break;
+      }
+      case "Facilities & Maintenance":
+        targetRole = "registrar";
+        officeIds = await userRepo.findIdsByRoles(["REGISTRAR"]);
+        break;
+      case "Financial / Billing":
+        targetRole = "accounting";
+        officeIds = await userRepo.findIdsByRoles(["ACCOUNTING"]);
+        break;
+      case "Health & Safety":
+        targetRole = "clinic";
+        officeIds = await userRepo.findIdsByRoles(["CLINIC"]);
+        break;
+      case "Student Conduct":
+      case "Discrimination or Harassment":
+      case "Other":
+      default:
+        targetRole = "sao";
+        officeIds = await userRepo.findIdsByRoles(["SAO"]);
+        break;
+    }
+
+    const recipients = [
+      ...adminIds.map((id) => ({ id, targetRole: "admin" })),
+      ...officeIds.map((id) => ({ id, targetRole: targetRole ?? "admin" })),
+    ];
+    await Promise.all(recipients.map(({ id, targetRole: recipientRole }) =>
+        notificationRepo.create(id, {
           title: "New Complaint Submitted",
           message,
           type: "info",
+          officeId: recipientRole,
           href: "/admin/support/complaints",
         }),
-      ),
-    );
-    adminIds.forEach((adminId) => broadcastNotificationUpdated(adminId));
+    ));
+    recipients.forEach(({ id }) => broadcastNotificationUpdated(id));
   } catch (error) {
     console.error("notifyAdminsOfNewComplaint Error:", error);
   }
@@ -290,6 +329,20 @@ export const createComplaintService = async (userId: string, body: any) => {
     }
 
     await notifyAdminsOfNewComplaint(result.complaint);
+    const studentNotification = await notificationRepo.create(userId, {
+      title: "Complaint Submitted",
+      message: "Your complaint has been submitted and is awaiting review.",
+      type: "info",
+      href: "/student/complaint-status",
+    });
+    broadcastNotificationCreated(userId, {
+      id: studentNotification.id,
+      title: studentNotification.title ?? null,
+      message: studentNotification.message,
+      type: studentNotification.type,
+      href: studentNotification.href ?? null,
+      createdAt: studentNotification.createdAt,
+    });
 
     return {
       code: 201,

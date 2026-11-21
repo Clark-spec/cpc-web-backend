@@ -18,11 +18,13 @@ export const tokenType = pgEnum("TokenType", ["REFRESH", "EMAIL_VERIFY"]);
 
 export const users = pgTable("user", {
   id: uuid().defaultRandom().primaryKey(),
-  email: text().unique().notNull(),
+  email: text().unique(),
   password: text().notNull(),
   name: text().notNull(),
   role: role().default("STUDENT").notNull(),
   studentNumber: text("student_number").unique(),
+  section: text(),
+  mustChangePassword: boolean("must_change_password").default(false).notNull(),
   course: text(),
   yearLevel: integer("year_level"),
   department: text(),
