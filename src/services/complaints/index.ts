@@ -67,6 +67,7 @@ function toStudentDto(row: any) {
     status: row.status,
     anonymous: row.isAnonymous === true,
     attachmentName: row.attachmentName ?? null,
+    attachmentUrl: row.attachmentData ?? null,
     adminRemarks: row.adminRemarks ?? "",
   };
 }
