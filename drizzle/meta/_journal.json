@@ -64,6 +64,13 @@
       "when": 1795260000000,
       "tag": "0008_student_id_login",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1795300000000,
+      "tag": "0009_persistent_enrollment_sessions",
+      "breakpoints": true
     }
   ]
 }

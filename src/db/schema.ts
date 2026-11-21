@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, uuid, text, timestamp, integer, boolean, serial, index } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, uuid, text, timestamp, integer, boolean, serial, index, jsonb } from "drizzle-orm/pg-core";
 
 export const role = pgEnum("Role", [
   "USER",
@@ -319,6 +319,13 @@ export const departmentSchedules = pgTable("department_schedule", {
   remainingSlots: integer("remaining_slots").default(100).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
 });
+
+/** Canonical cross-device enrollment state. Detailed actions are validated in the enrollment service. */
+export const enrollmentSessions = pgTable("enrollment_session", {
+  studentId: text("student_id").primaryKey().references(() => masterlist.studentIdNo, { onDelete: "cascade" }),
+  session: jsonb("session").$type<Record<string, unknown>>().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
+}, (table) => [index("enrollment_session_updated_idx").on(table.updatedAt)]);
 
 export const queueTickets = pgTable("queue_ticket", {
   id: text().primaryKey(),

@@ -1,10 +1,12 @@
-ALTER TYPE "public"."Role" ADD VALUE 'STUDENT' BEFORE 'ADMIN';--> statement-breakpoint
-ALTER TYPE "public"."Role" ADD VALUE 'REGISTRAR';--> statement-breakpoint
-ALTER TYPE "public"."Role" ADD VALUE 'DEAN';--> statement-breakpoint
-ALTER TYPE "public"."Role" ADD VALUE 'LIBRARY';--> statement-breakpoint
-ALTER TYPE "public"."Role" ADD VALUE 'ACCOUNTING';--> statement-breakpoint
-ALTER TYPE "public"."Role" ADD VALUE 'SAO';--> statement-breakpoint
-ALTER TYPE "public"."Role" ADD VALUE 'INSTRUCTOR';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'STUDENT' BEFORE 'ADMIN';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'REGISTRAR';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'DEAN';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'LIBRARY';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'ACCOUNTING';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'SAO';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'INSTRUCTOR';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'GUIDANCE';--> statement-breakpoint
+ALTER TYPE "public"."Role" ADD VALUE IF NOT EXISTS 'CLINIC';--> statement-breakpoint
 CREATE TABLE "purpose" (
 	"id" serial PRIMARY KEY NOT NULL,
 	"label" text NOT NULL,
@@ -60,16 +62,15 @@ CREATE TABLE "student_profile" (
 	CONSTRAINT "student_profile_user_id_unique" UNIQUE("user_id")
 );
 --> statement-breakpoint
-ALTER TABLE "user" ALTER COLUMN "email" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "user" ALTER COLUMN "password" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "user" ALTER COLUMN "name" SET NOT NULL;--> statement-breakpoint
 ALTER TABLE "user" ALTER COLUMN "role" SET DEFAULT 'STUDENT';--> statement-breakpoint
-ALTER TABLE "user" ADD COLUMN "student_number" text;--> statement-breakpoint
-ALTER TABLE "user" ADD COLUMN "course" text;--> statement-breakpoint
-ALTER TABLE "user" ADD COLUMN "year_level" integer;--> statement-breakpoint
-ALTER TABLE "user" ADD COLUMN "department" text;--> statement-breakpoint
-ALTER TABLE "user" ADD COLUMN "avatar_url" text;--> statement-breakpoint
-ALTER TABLE "user" ADD COLUMN "phone" text;--> statement-breakpoint
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "student_number" text;--> statement-breakpoint
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "course" text;--> statement-breakpoint
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "year_level" integer;--> statement-breakpoint
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "department" text;--> statement-breakpoint
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "avatar_url" text;--> statement-breakpoint
+ALTER TABLE "user" ADD COLUMN IF NOT EXISTS "phone" text;--> statement-breakpoint
 ALTER TABLE "service_request" ADD CONSTRAINT "service_request_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "service_request" ADD CONSTRAINT "service_request_service_id_service_id_fk" FOREIGN KEY ("service_id") REFERENCES "public"."service"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "student_profile" ADD CONSTRAINT "student_profile_user_id_user_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."user"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
