@@ -1,7 +1,7 @@
 import { and, eq, gte, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { enrollmentSessions, masterlist, notifications, users } from "@/db/schema";
-import { broadcastNotificationCreated, broadcastNotificationUpdated } from "@/services/sse";
+import { enrollmentSessions, masterlist, notifications, signatureOfficeDailyCounts, signatureQueueProcessing, users } from "@/db/schema";
+import { broadcastEnrollmentQueueUpdated, broadcastNotificationCreated, broadcastNotificationUpdated } from "@/services/sse";
 import { UserRepository } from "@/repositories/user-repository";
 
 const userRepository = new UserRepository();
@@ -19,6 +19,180 @@ const offices: Record<SignatureOffice, { label: string; role: string; href: stri
 
 function asOffice(value: unknown): SignatureOffice | null {
   return typeof value === "string" && value in offices ? value as SignatureOffice : null;
+}
+
+type SignatureQueueType = "study_load" | "office_signatures";
+const clearanceRoleByOffice: Record<ClearanceOffice, string> = { dean: "DEAN", sao: "SAO", library: "LIBRARY", accounting: "ACCOUNTING", registrar: "REGISTRAR" };
+
+async function clearActiveSignatureProcessing(queueType: SignatureQueueType, office: string, studentId: string) {
+  await db.update(signatureQueueProcessing).set({ studentId: null, queueDate: null, queueNumber: null, startedAt: null, startedBy: null })
+    .where(and(eq(signatureQueueProcessing.queueType, queueType), eq(signatureQueueProcessing.office, office), eq(signatureQueueProcessing.studentId, studentId)));
+  const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+  if (student) broadcastEnrollmentQueueUpdated(student.id);
+}
+
+export async function startSignatureQueueProcessing(actorId: string, role: string, queueTypeInput: unknown, officeInput: unknown, studentId: string, feePaidConfirmed = false) {
+  const queueType = queueTypeInput === "study_load" || queueTypeInput === "office_signatures" ? queueTypeInput : null;
+  if (!queueType) return { code: 400, message: "Unknown signature queue." };
+  let queueNumber: number | undefined;
+  let queueDate: string | undefined;
+  let session: Snapshot | undefined;
+  let office: string;
+  if (queueType === "study_load") {
+    const studyOffice = asOffice(officeInput);
+    if (!studyOffice || !mayHandleOffice(role, studyOffice)) return { code: 403, message: "You cannot process this office queue." };
+    office = studyOffice;
+    const [row] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
+    if (!row) return { code: 404, message: "Enrollment Study Load was not found." };
+    session = row.session as Snapshot;
+    if (!session.signatureRequests?.[office] || session.steps?.[office]?.status !== "PENDING") return { code: 409, message: "This request is no longer waiting in the queue." };
+    const actor = await actorRecord(actorId);
+    if (role === "DEAN" && !departmentMatches(actor?.department ?? null, String(session.student?.department ?? ""))) return { code: 403, message: "You can only process requests in your assigned department." };
+    if (office === "screening") {
+      if (!session.screeningFeePaidAt && !feePaidConfirmed) return { code: 409, message: "Confirm the ₱100 face-to-face payment before starting this request." };
+      if (feePaidConfirmed) {
+        session.screeningFeePaidAt = session.screeningFeePaidAt ?? new Date().toISOString();
+        session.screeningFeeVerifiedBy = session.screeningFeeVerifiedBy ?? actor?.name ?? role;
+        await db.update(enrollmentSessions).set({ session, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, studentId));
+        const viewers = await db.select({ id: users.id }).from(users).where(inArray(users.role, ["ADMIN", "DEAN", "GUIDANCE"]));
+        viewers.forEach(({ id }) => broadcastEnrollmentQueueUpdated(id));
+        const [studentUser] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+        if (studentUser) broadcastEnrollmentQueueUpdated(studentUser.id);
+      }
+    }
+    queueNumber = Number(session.signatureQueue?.[office]?.number);
+    queueDate = String(session.signatureQueue?.[office]?.date ?? "");
+  } else {
+    const clearanceOffice = typeof officeInput === "string" && officeInput in clearanceRoleByOffice ? officeInput as ClearanceOffice : null;
+    if (!clearanceOffice || (role !== "ADMIN" && role !== clearanceRoleByOffice[clearanceOffice])) return { code: 403, message: "You cannot process this office queue." };
+    office = clearanceOffice;
+    const [row] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
+    if (!row) return { code: 404, message: "Student clearance record was not found." };
+    const state = normalizeClearance((row.session as Snapshot).clearance, (row.session as Snapshot).student ?? {});
+    const actor = await actorRecord(actorId);
+    if (role === "DEAN" && clearanceOffice === "dean" && !departmentMatches(actor?.department ?? null, String(state.program ?? ""))) return { code: 403, message: "You can only process requests in your assigned department." };
+    const request = state.offices.find((entry: Snapshot) => entry.office === office);
+    if (request?.status !== "requested") return { code: 409, message: "This request is no longer waiting in the queue." };
+    queueNumber = Number(request.queueNumber);
+    queueDate = String(request.queueDate ?? "");
+  }
+  if (!Number.isFinite(queueNumber) || !queueDate) return { code: 409, message: "This request does not have a valid queue number." };
+  const queuedSessions = (await db.select({ session: enrollmentSessions.session }).from(enrollmentSessions)).map((row) => row.session as Snapshot);
+  const eligibleQueue = queueType === "study_load"
+    ? queuedSessions.flatMap((candidate) => {
+        if (!candidate.signatureRequests?.[office] || candidate.steps?.[office]?.status !== "PENDING") return [];
+        const paid = office !== "screening" || Boolean(candidate.screeningFeePaidAt) || (candidate.student?.studentIdNo === studentId && feePaidConfirmed);
+        if (!paid) return [];
+        const queue = candidate.signatureQueue?.[office];
+        return queue ? [{ studentId: String(candidate.student?.studentIdNo ?? ""), queueNumber: Number(queue.number), queueDate: String(queue.date ?? "") }] : [];
+      })
+    : queuedSessions.flatMap((candidate) => {
+        const record = normalizeClearance(candidate.clearance, candidate.student ?? {});
+        const request = record.offices.find((entry: Snapshot) => entry.office === office && entry.status === "requested");
+        return request?.queueNumber ? [{ studentId: String(record.studentId), queueNumber: Number(request.queueNumber), queueDate: String(request.queueDate ?? "") }] : [];
+      });
+  eligibleQueue.sort((a, b) => a.queueDate.localeCompare(b.queueDate) || a.queueNumber - b.queueNumber);
+  if (eligibleQueue[0]?.studentId !== studentId) {
+    const first = eligibleQueue[0];
+    return { code: 409, message: first ? `Please process the earlier eligible request #${first.queueNumber} first.` : "This request is not eligible to start processing." };
+  }
+  const startedAt = new Date().toISOString();
+  const actor = await actorRecord(actorId);
+  const result = await db.transaction(async (tx) => {
+    await tx.insert(signatureQueueProcessing).values({ queueType, office, studentId: null, queueDate: null, queueNumber: null }).onConflictDoNothing();
+    const [active] = await tx.select().from(signatureQueueProcessing).where(and(eq(signatureQueueProcessing.queueType, queueType), eq(signatureQueueProcessing.office, office))).for("update");
+    const [lockedRow] = await tx.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).for("update");
+    if (!lockedRow) return { error: queueType === "study_load" ? "Enrollment Study Load was not found." : "Student clearance record was not found." };
+    const lockedSession = lockedRow.session as Snapshot;
+    if (queueType === "study_load") {
+      if (!lockedSession.signatureRequests?.[office] || lockedSession.steps?.[office]?.status !== "PENDING") {
+        return { error: "This request is no longer waiting in the queue." };
+      }
+      if (office === "screening" && !lockedSession.screeningFeePaidAt && !feePaidConfirmed) {
+        return { error: "Confirm the ₱100 face-to-face payment before starting this request." };
+      }
+    } else {
+      const record = normalizeClearance(lockedSession.clearance, lockedSession.student ?? {});
+      const request = record.offices.find((entry: Snapshot) => entry.office === office);
+      if (request?.status !== "requested") return { error: "This request is no longer waiting in the queue." };
+    }
+    if (active?.studentId) return { error: "This office is already processing another request. Please finish it first." };
+    await tx.update(signatureQueueProcessing).set({ studentId, queueDate, queueNumber, startedAt, startedBy: actor?.name ?? role })
+      .where(and(eq(signatureQueueProcessing.queueType, queueType), eq(signatureQueueProcessing.office, office)));
+    if (queueType === "study_load" && session) await tx.update(enrollmentSessions).set({ session, updatedAt: startedAt }).where(eq(enrollmentSessions.studentId, studentId));
+    return { ok: true };
+  });
+  if ("error" in result) return { code: 409, message: result.error };
+  const roleName = queueType === "study_load" ? offices[office as SignatureOffice].role : clearanceRoleByOffice[office as ClearanceOffice];
+  const viewerRoles = ["ADMIN", roleName, ...(queueType === "study_load" && office === "screening" ? ["GUIDANCE"] : [])] as typeof users.$inferSelect.role[];
+  const viewers = await db.select({ id: users.id }).from(users).where(inArray(users.role, viewerRoles));
+  viewers.forEach(({ id }) => broadcastEnrollmentQueueUpdated(id));
+  const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+  if (student) broadcastEnrollmentQueueUpdated(student.id);
+  return { code: 200, data: { queueType, office, queueNumber, queueDate, startedAt } };
+}
+
+export async function finishSignatureQueueProcessing(actorId: string, role: string, queueTypeInput: unknown, officeInput: unknown, studentId: string) {
+  const queueType = queueTypeInput === "study_load" || queueTypeInput === "office_signatures" ? queueTypeInput : null;
+  if (!queueType) return { code: 400, message: "Unknown signature queue." };
+  const office = String(officeInput ?? "");
+  const authorized = queueType === "study_load"
+    ? Boolean(asOffice(office) && mayHandleOffice(role, office as SignatureOffice))
+    : (office in clearanceRoleByOffice && (role === "ADMIN" || role === clearanceRoleByOffice[office as ClearanceOffice]));
+  if (!authorized) return { code: 403, message: "You cannot update this office queue." };
+  const [active] = await db.select().from(signatureQueueProcessing).where(and(eq(signatureQueueProcessing.queueType, queueType), eq(signatureQueueProcessing.office, office))).limit(1);
+  if (!active?.studentId) return { code: 409, message: "No request is currently being processed." };
+  if (active.studentId !== studentId && role !== "ADMIN") return { code: 403, message: "You cannot finish another request." };
+  await clearActiveSignatureProcessing(queueType, office, active.studentId);
+  const roleName = queueType === "study_load" ? offices[office as SignatureOffice].role : clearanceRoleByOffice[office as ClearanceOffice];
+  const viewers = await db.select({ id: users.id }).from(users).where(inArray(users.role, ["ADMIN", roleName] as typeof users.$inferSelect.role[]));
+  viewers.forEach(({ id }) => broadcastEnrollmentQueueUpdated(id));
+  const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, active.studentId)).limit(1);
+  if (student) broadcastEnrollmentQueueUpdated(student.id);
+  return { code: 200, data: { queueType, office } };
+}
+
+/** Public board payload intentionally contains queue identifiers only. */
+export async function getPublicSignatureBoards() {
+  const rows = await db.select({ session: enrollmentSessions.session }).from(enrollmentSessions);
+  const sessions = rows.map((row) => row.session as Snapshot);
+  const activeRows = await db.select().from(signatureQueueProcessing);
+  const mapQueue = (queueType: SignatureQueueType, office: string, candidates: Array<{ queueNumber: number; queueDate: string; awaitingPayment?: boolean }>) => {
+    const active = activeRows.find((row) => row.queueType === queueType && row.office === office && row.studentId);
+    const sorted = candidates.filter((item) => Number.isFinite(item.queueNumber)).sort((a, b) => a.queueDate.localeCompare(b.queueDate) || a.queueNumber - b.queueNumber);
+    const activeIsQueued = active && sorted.some((item) => item.queueNumber === active.queueNumber && item.queueDate === active.queueDate);
+    const next = sorted.filter((item) => !activeIsQueued || item.queueNumber !== active?.queueNumber || item.queueDate !== active?.queueDate).slice(0, 5);
+    return {
+      office,
+      nowServing: active?.studentId ? { queueNumber: active.queueNumber, queueDate: active.queueDate } : null,
+      startedAt: active?.startedAt ?? null,
+      next,
+    };
+  };
+  const studyOffices = (Object.keys(offices) as SignatureOffice[]).map((office) => mapQueue("study_load", office, sessions.flatMap((session) => {
+    if (!session.signatureRequests?.[office] || session.steps?.[office]?.status !== "PENDING") return [];
+    const queue = session.signatureQueue?.[office];
+    return queue ? [{ queueNumber: Number(queue.number), queueDate: String(queue.date ?? ""), ...(office === "screening" && !session.screeningFeePaidAt ? { awaitingPayment: true } : {}) }] : [];
+  })));
+  const clearanceLabelsForBoard: Record<ClearanceOffice, string> = { dean: "Dean", sao: "SAO / SSG Adviser", library: "Library", accounting: "Accounting", registrar: "Registrar" };
+  const clearanceOfficesForBoard = ["dean", "sao", "library", "accounting", "registrar"] as ClearanceOffice[];
+  const clearanceBoards = clearanceOfficesForBoard.map((office) => {
+    const board = mapQueue("office_signatures", office, sessions.flatMap((session) => {
+      const record = normalizeClearance(session.clearance, session.student ?? {});
+      const request = record.offices.find((entry: Snapshot) => entry.office === office && entry.status === "requested");
+      return request?.queueNumber ? [{ queueNumber: Number(request.queueNumber), queueDate: String(request.queueDate ?? "") }] : [];
+    }));
+    return { ...board, office: clearanceLabelsForBoard[office] };
+  });
+  const studyLabels: Record<SignatureOffice, string> = { screening: "Dean & Screening", guidance: "Guidance", clinic: "Clinic", registrar: "Registrar", accounting: "Accounting" };
+  return {
+    code: 200,
+    data: {
+      studyLoad: studyOffices.map((board) => ({ ...board, office: studyLabels[board.office as SignatureOffice] })),
+      officeSignatures: clearanceBoards,
+      updatedAt: new Date().toISOString(),
+    },
+  };
 }
 
 async function actorRecord(actorId: string) {
@@ -443,11 +617,16 @@ export async function getOwnEnrollmentSession(actorId: string) {
       signatureRequests: existing.signatureRequests ?? {},
       clearance,
     };
+    const activeStudyQueues = await db.select({ office: signatureQueueProcessing.office, studentId: signatureQueueProcessing.studentId })
+      .from(signatureQueueProcessing).where(eq(signatureQueueProcessing.queueType, "study_load"));
+    const signatureQueueProcessingOffices = activeStudyQueues
+      .filter((active) => active.studentId === studentId)
+      .map((active) => active.office);
     if (clearanceComplete) nextSession.steps.clearance = { ...nextSession.steps.clearance, status: "APPROVED", updatedAt: clearance.completedAt };
     if (!existing.steps || !existing.form || !existing.clearance || plan.promote) {
       await db.update(enrollmentSessions).set({ session: nextSession, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, studentId));
     }
-    return { code: 200, data: { session: nextSession } };
+    return { code: 200, data: { session: { ...nextSession, signatureQueueProcessingOffices } } };
   }
   const student = {
     studentIdNo: record.studentIdNo,
@@ -582,6 +761,20 @@ export async function getOfficeSignatureRequests(actorId: string, role: string, 
     if (!session?.signatureRequests?.[office]) return false;
     return role !== "DEAN" || departmentMatches(actor?.department ?? null, String(session.student?.department ?? ""));
   });
+  sessions.sort((left, right) => {
+    if (office === "screening") {
+      const leftPaid = Boolean(left.screeningFeePaidAt);
+      const rightPaid = Boolean(right.screeningFeePaidAt);
+      if (leftPaid !== rightPaid) return leftPaid ? -1 : 1;
+    }
+    const leftRequestedAt = String(left.signatureRequests[office]);
+    const rightRequestedAt = String(right.signatureRequests[office]);
+    const leftQueueDate = String(left.signatureQueue?.[office]?.date ?? leftRequestedAt.slice(0, 10));
+    const rightQueueDate = String(right.signatureQueue?.[office]?.date ?? rightRequestedAt.slice(0, 10));
+    const leftQueue = Number(left.signatureQueue?.[office]?.number ?? Number.MAX_SAFE_INTEGER);
+    const rightQueue = Number(right.signatureQueue?.[office]?.number ?? Number.MAX_SAFE_INTEGER);
+    return leftQueueDate.localeCompare(rightQueueDate) || leftQueue - rightQueue || Date.parse(leftRequestedAt) - Date.parse(rightRequestedAt);
+  });
   await Promise.all(sessions.filter((session) => session.steps?.[office]?.status === "PENDING").map((session) => ensureOfficeSignatureRequestNotices(
     office,
     String(session.student?.department ?? ""),
@@ -589,7 +782,14 @@ export async function getOfficeSignatureRequests(actorId: string, role: string, 
     String(session.student?.name ?? session.student?.studentIdNo ?? "Student"),
     String(session.signatureRequests[office]),
   ).catch((error) => console.error("Could not ensure office signature notification", error))));
-  return { code: 200, data: { sessions } };
+  const [processing] = await db.select().from(signatureQueueProcessing).where(and(eq(signatureQueueProcessing.queueType, "study_load"), eq(signatureQueueProcessing.office, office))).limit(1);
+  const sessionsWithProcessing = sessions.map((session) => ({
+    ...session,
+    signatureQueueProcessing: processing?.studentId === session.student?.studentIdNo
+      ? { startedAt: processing.startedAt, startedBy: processing.startedBy }
+      : undefined,
+  }));
+  return { code: 200, data: { sessions: sessionsWithProcessing } };
 }
 
 export async function submitEnrollmentSession(actorId: string, input: unknown) {
@@ -671,46 +871,79 @@ export async function requestOfficeSignature(actorId: string, studentIdInput: st
   const studentId = await ownStudentId(actorId);
   const office = asOffice(officeInput);
   if (!studentId || studentId !== studentIdInput || !office) return { code: 403, message: "This signature request is not authorized." };
-  const [row] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
-  if (!row) return { code: 404, message: "Submit your Study Load before requesting signatures." };
-  const session = row.session as Snapshot;
-  const signed = (key: string) => session.steps?.[key]?.status === "APPROVED";
-  const formReady = ["SUBMITTED", "APPROVED"].includes(String(session.form?.status));
-  const firstThreeSigned = signed("screening") && signed("guidance") && signed("clinic");
-  const available = office === "screening" || office === "guidance" || office === "clinic"
-    ? formReady && !signed(office)
-    : firstThreeSigned && !signed(office);
-  if (!available) return { code: 409, message: "This signature request is not available yet." };
-  if (session.signatureRequests?.[office] && session.steps?.[office]?.status !== "RESUBMIT") return { code: 409, message: "You already sent a request to this office." };
-  const now = new Date().toISOString();
-  session.signatureRequests = { ...session.signatureRequests, [office]: now };
-  session.steps[office] = { ...session.steps[office], status: "PENDING" };
-  await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+  const localDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const result = await db.transaction(async (tx) => {
+    await tx.insert(signatureOfficeDailyCounts).values({ queueType: "study_load", office, localDate, requestCount: 0 }).onConflictDoNothing();
+    const [counter] = await tx.select().from(signatureOfficeDailyCounts).where(and(
+      eq(signatureOfficeDailyCounts.queueType, "study_load"),
+      eq(signatureOfficeDailyCounts.office, office),
+      eq(signatureOfficeDailyCounts.localDate, localDate),
+    )).for("update");
+    if ((counter?.requestCount ?? 0) >= 1000) return { error: "Today’s signature request limit is full. Please try again tomorrow." };
+    const [row] = await tx.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
+    if (!row) return { error: "Submit your Study Load before requesting signatures.", code: 404 };
+    const session = row.session as Snapshot;
+    const signed = (key: string) => session.steps?.[key]?.status === "APPROVED";
+    const formReady = ["SUBMITTED", "APPROVED"].includes(String(session.form?.status));
+    const firstThreeSigned = signed("screening") && signed("guidance") && signed("clinic");
+    const available = office === "screening" || office === "guidance" || office === "clinic"
+      ? formReady && !signed(office)
+      : firstThreeSigned && !signed(office);
+    if (!available) return { error: "This signature request is not available yet.", code: 409 };
+    if (session.signatureRequests?.[office] && session.steps?.[office]?.status !== "RESUBMIT") return { error: "You already sent a request to this office.", code: 409 };
+    const now = new Date().toISOString();
+    const queueNumber = (counter?.requestCount ?? 0) + 1;
+    session.signatureRequests = { ...session.signatureRequests, [office]: now };
+    session.signatureQueue = { ...session.signatureQueue, [office]: { date: localDate, number: queueNumber } };
+    session.steps[office] = { ...session.steps[office], status: "PENDING" };
+    await tx.update(signatureOfficeDailyCounts).set({ requestCount: queueNumber }).where(and(
+      eq(signatureOfficeDailyCounts.queueType, "study_load"),
+      eq(signatureOfficeDailyCounts.office, office),
+      eq(signatureOfficeDailyCounts.localDate, localDate),
+    ));
+    await tx.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+    return { session, now, queueNumber };
+  });
+  if ("error" in result) return { code: result.code ?? 409, message: result.error };
+  const { session, now, queueNumber } = result;
   const fullName = String(session.student?.name ?? studentId);
   await Promise.all([
     ensureOfficeSignatureRequestNotices(office, String(session.student?.department ?? ""), studentId, fullName, now),
     notifyStudent(studentId, office, `Request sent to ${offices[office].label}`, `Your Study Load signature request was sent to ${offices[office].label}.`, "success"),
   ]).catch((error) => console.error("Enrollment signature request saved, but a notification could not be delivered", error));
-  return { code: 200, data: { session } };
+  return { code: 200, data: { session, queueNumber, dailyLimit: 1000 } };
 }
 
 export async function cancelOfficeSignatureRequest(actorId: string, studentIdInput: string, officeInput: unknown) {
   const studentId = await ownStudentId(actorId);
   const office = asOffice(officeInput);
   if (!studentId || studentId !== studentIdInput || !office) return { code: 403, message: "This signature cancellation is not authorized." };
-  const [row] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
-  if (!row) return { code: 404, message: "Enrollment Study Load was not found." };
-  const session = row.session as Snapshot;
-  if (!session.signatureRequests?.[office] || session.steps?.[office]?.status === "APPROVED") {
-    return { code: 409, message: "There is no cancellable signature request for this office." };
-  }
-  const requestedAt = session.signatureRequests[office] as string;
-  const now = new Date().toISOString();
-  const requests = { ...session.signatureRequests };
-  delete requests[office];
-  session.signatureRequests = requests;
-  session.steps[office] = { ...session.steps[office], status: "PENDING", respondedAt: undefined, updatedAt: now };
-  await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+  const result = await db.transaction(async (tx) => {
+    await tx.insert(signatureQueueProcessing).values({ queueType: "study_load", office, studentId: null, queueDate: null, queueNumber: null }).onConflictDoNothing();
+    const [active] = await tx.select().from(signatureQueueProcessing).where(and(
+      eq(signatureQueueProcessing.queueType, "study_load"),
+      eq(signatureQueueProcessing.office, office),
+    )).for("update");
+    if (active?.studentId === studentId) return { error: "The office has started processing this request, so it can no longer be cancelled. Please contact the office." };
+    const [row] = await tx.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).for("update");
+    if (!row) return { error: "Enrollment Study Load was not found.", code: 404 };
+    const session = row.session as Snapshot;
+    if (!session.signatureRequests?.[office] || session.steps?.[office]?.status === "APPROVED") {
+      return { error: "There is no cancellable signature request for this office." };
+    }
+    const requestedAt = session.signatureRequests[office] as string;
+    const now = new Date().toISOString();
+    const requests = { ...session.signatureRequests };
+    delete requests[office];
+    session.signatureRequests = requests;
+    session.steps[office] = { ...session.steps[office], status: "PENDING", respondedAt: undefined, updatedAt: now };
+    await tx.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+    return { session, requestedAt, now };
+  });
+  if ("error" in result) return { code: result.code ?? 409, message: result.error };
+  const { session, requestedAt, now } = result;
+  const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+  if (student) broadcastEnrollmentQueueUpdated(student.id);
   const fullName = String(session.student?.name ?? studentId);
   await Promise.all([
     updateOfficeSignatureNotice(studentId, fullName, office, requestedAt, "cancelled"),
@@ -729,6 +962,8 @@ export async function signEnrollmentStep(actorId: string, role: string, studentI
   const session = row.session as Snapshot;
   if (!session.signatureRequests?.[office]) return { code: 409, message: "The student has not requested this office's signature." };
   if (session.steps?.[office]?.status === "APPROVED") return { code: 409, message: "This office has already signed the Study Load." };
+  const [activeProcessing] = await db.select().from(signatureQueueProcessing).where(and(eq(signatureQueueProcessing.queueType, "study_load"), eq(signatureQueueProcessing.office, office))).limit(1);
+  if (activeProcessing?.studentId !== studentId) return { code: 409, message: "Start processing this request before signing it." };
   const signature = signatureInput && typeof signatureInput === "object" ? signatureInput as Snapshot : {};
   const imageBase64 = typeof signature.imageBase64 === "string" ? signature.imageBase64 : "";
   const signatureMethod = signature.method;
@@ -790,6 +1025,11 @@ export async function signEnrollmentStep(actorId: string, role: string, studentI
     await notifyStudent(studentId, office, "You are officially enrolled", `All five offices signed your Study Load for ${session.form?.term ?? "this term"}.`, "success");
   } else {
     await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+  }
+  await clearActiveSignatureProcessing("study_load", office, studentId);
+  if (office === "screening") {
+    const queueViewers = await db.select({ id: users.id }).from(users).where(inArray(users.role, ["ADMIN", "DEAN", "GUIDANCE"]));
+    queueViewers.forEach(({ id }) => broadcastEnrollmentQueueUpdated(id));
   }
   return { code: 200, data: { session, allSigned } };
 }
@@ -854,6 +1094,13 @@ export async function getClearanceRecord(actorId: string, role: string, studentI
   if (!row) return { code: 404, message: "Student clearance record was not found." };
   const session = row.session as Snapshot;
   const state = normalizeClearance(session.clearance, session.student ?? {});
+  if (role === "STUDENT") {
+    const activeRows = await db.select({ office: signatureQueueProcessing.office, studentId: signatureQueueProcessing.studentId })
+      .from(signatureQueueProcessing).where(eq(signatureQueueProcessing.queueType, "office_signatures"));
+    for (const officeRecord of state.offices as Snapshot[]) {
+      officeRecord.isProcessing = activeRows.some((active) => active.office === officeRecord.office && active.studentId === studentId);
+    }
+  }
   if (role === "STUDENT") await reconcileStudentClearanceNotifications(actorId, state);
   if (state.offices.some((office: Snapshot) => office.office === "sao" && office.status === "signed") && state.saoEvents.some((event: Snapshot) => event.attended !== true)) {
     session.clearance = state;
@@ -868,6 +1115,17 @@ export async function listClearanceRecords(actorId: string, role: string) {
   if (office) await userRepository.ensureDemoStaffAccountsForRole(role);
   const actor = await actorRecord(actorId);
   const records = all.map((row) => { const s = row.session as Snapshot; return normalizeClearance(s.clearance, s.student ?? {}); });
+  const processingRows = await db.select().from(signatureQueueProcessing).where(eq(signatureQueueProcessing.queueType, "office_signatures"));
+  for (const record of records) {
+    for (const officeRecord of record.offices as Snapshot[]) {
+      const processing = processingRows.find((entry) => entry.office === officeRecord.office && entry.studentId === record.studentId);
+      officeRecord.isProcessing = Boolean(processing);
+      if (processing) {
+        officeRecord.processingAt = processing.startedAt;
+        officeRecord.processingBy = processing.startedBy;
+      }
+    }
+  }
   const scoped = role === "ADMIN" ? records : records.filter((r) => r.offices?.some((o: Snapshot) => o.office === office) && (role !== "DEAN" || departmentMatches(actor?.department ?? null, String(r.program ?? ""))));
   if (office) {
     for (const record of scoped) {
@@ -877,7 +1135,80 @@ export async function listClearanceRecords(actorId: string, role: string) {
   }
   return { code: 200, data: { records: scoped, period: { open: true } } };
 }
+
+export async function requestClearanceSignatures(actorId: string, officeInputs: unknown, note?: unknown) {
+  const studentId = await ownStudentId(actorId);
+  if (!studentId || !Array.isArray(officeInputs) || officeInputs.length === 0) {
+    return { code: 400, message: "Select at least one Office Signature request." };
+  }
+  const offices = [...new Set(officeInputs)].filter((value): value is ClearanceOffice => clearanceOffices.includes(value as ClearanceOffice));
+  if (offices.length !== officeInputs.length) return { code: 400, message: "One or more Office Signature requests are invalid." };
+  const row = await clearanceRow(studentId);
+  if (!row) return { code: 404, message: "Student clearance record was not found." };
+  const localDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const result = await db.transaction(async (tx) => {
+    const countsByOffice: Partial<Record<ClearanceOffice, number>> = {};
+    for (const office of [...offices].sort()) {
+      await tx.insert(signatureOfficeDailyCounts).values({ queueType: "office_signatures", office, localDate, requestCount: 0 }).onConflictDoNothing();
+      const [counter] = await tx.select().from(signatureOfficeDailyCounts).where(and(
+        eq(signatureOfficeDailyCounts.queueType, "office_signatures"),
+        eq(signatureOfficeDailyCounts.office, office),
+        eq(signatureOfficeDailyCounts.localDate, localDate),
+      )).for("update");
+      const count = counter?.requestCount ?? 0;
+      if (count >= 1000) return { error: `${clearanceLabels[office]} has reached its 1,000 request limit for today. Please try again tomorrow.` };
+      countsByOffice[office] = count;
+    }
+    const [lockedRow] = await tx.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).for("update");
+    if (!lockedRow) return { error: "Student clearance record was not found.", code: 404 };
+    const session = lockedRow.session as Snapshot;
+    const record = normalizeClearance(session.clearance, session.student ?? {});
+    if (!record.periodOpen) return { error: "The Office Signatures request period is closed." };
+    const selected = offices.map((office) => record.offices.find((entry: Snapshot) => entry.office === office) as Snapshot);
+    if (selected.some((entry) => !entry || entry.status === "signed" || entry.status === "requested")) {
+      return { error: "One or more selected Office Signature requests are no longer available." };
+    }
+    const requestedAt = new Date().toISOString();
+    selected.forEach((entry) => Object.assign(entry, {
+      status: "requested",
+      requestedAt,
+      studentNote: typeof note === "string" ? note.trim().slice(0, 1000) : undefined,
+      queueDate: localDate,
+      queueNumber: (countsByOffice[entry.office as ClearanceOffice] ?? 0) + 1,
+    }));
+    session.clearance = record;
+    for (const office of offices) {
+      await tx.update(signatureOfficeDailyCounts).set({ requestCount: (countsByOffice[office] ?? 0) + 1 }).where(and(
+        eq(signatureOfficeDailyCounts.queueType, "office_signatures"),
+        eq(signatureOfficeDailyCounts.office, office),
+        eq(signatureOfficeDailyCounts.localDate, localDate),
+      ));
+    }
+    await tx.update(enrollmentSessions).set({ session, updatedAt: requestedAt }).where(eq(enrollmentSessions.studentId, studentId));
+    return { record, requestedAt };
+  });
+  if ("error" in result) return { code: result.code ?? 409, message: result.error };
+
+  const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+  if (student) {
+    await Promise.all(offices.map(async (office) => {
+      const roleForOffice = ({ dean: "DEAN", registrar: "REGISTRAR", sao: "SAO", library: "LIBRARY", accounting: "ACCOUNTING" }[office]) as typeof users.$inferSelect.role;
+      await userRepository.ensureDemoStaffAccountsForRole(roleForOffice);
+      const recipients = await db.select({ id: users.id, department: users.department }).from(users).where(eq(users.role, roleForOffice));
+      const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "ADMIN"));
+      const officeRecipients = office === "dean" ? recipients.filter((user) => departmentMatches(user.department, String(result.record.program ?? ""))) : recipients;
+      await Promise.all([...new Set([...officeRecipients.map((user) => user.id), ...admins.map((user) => user.id)])]
+        .map((id) => notify(id, office, `Clearance pending: ${clearanceLabels[office]}`, `${result.record.studentName} (${studentId}) has a pending clearance signature request.`, `/admin/clearance-requests?office=${office}&student=${studentId}`)));
+      await notify(student.id, office, `Clearance pending: ${clearanceLabels[office]}`, `Your ${clearanceLabels[office]} clearance request was sent and is pending review.`, "/student/clearance");
+    }));
+  }
+  return { code: 200, data: { record: result.record } };
+}
+
 export async function updateClearance(actorId: string, role: string, studentId: string | null, operation: Snapshot) {
+  if (role === "STUDENT" && operation.action === "request") {
+    return requestClearanceSignatures(actorId, [operation.office], operation.note);
+  }
   const ownId = role === "STUDENT" ? await ownStudentId(actorId) : null;
   const targetId = ownId ?? studentId;
   if (!targetId || (ownId && studentId && ownId !== studentId)) return { code: 403, message: "This clearance action is not authorized." };
@@ -904,17 +1235,41 @@ export async function updateClearance(actorId: string, role: string, studentId: 
         ].map((id) => notify(id, office, `Clearance pending: ${clearanceLabels[office]}`, `${record.studentName} (${targetId}) has a pending clearance signature request.`, `/admin/clearance-requests?office=${office}&student=${targetId}`)));
         await notify(student.id, office, `Clearance pending: ${clearanceLabels[office]}`, `Your ${clearanceLabels[office]} clearance request was sent and is pending review.`, "/student/clearance");
       }
-    } else if (operation.action === "cancel" && current.status === "requested") {
-      Object.assign(current, { status: "not_requested", requestedAt: undefined });
+    } else if (operation.action === "cancel") {
+      const cancelled = await db.transaction(async (tx) => {
+        await tx.insert(signatureQueueProcessing).values({ queueType: "office_signatures", office, studentId: null, queueDate: null, queueNumber: null }).onConflictDoNothing();
+        const [active] = await tx.select().from(signatureQueueProcessing).where(and(
+          eq(signatureQueueProcessing.queueType, "office_signatures"),
+          eq(signatureQueueProcessing.office, office),
+        )).for("update");
+        if (active?.studentId === targetId) return { error: "The office has started processing this request, so it can no longer be cancelled. Please contact the office." };
+        const [lockedRow] = await tx.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, targetId)).for("update");
+        if (!lockedRow) return { error: "Student clearance record was not found.", code: 404 };
+        const lockedSession = lockedRow.session as Snapshot;
+        const lockedRecord = normalizeClearance(lockedSession.clearance, lockedSession.student ?? {});
+        const lockedOffice = lockedRecord.offices.find((entry: Snapshot) => entry.office === office);
+        if (lockedOffice?.status !== "requested") return { error: "There is no cancellable request for this office." };
+        const requestedAt = lockedOffice.requestedAt as string | undefined;
+        Object.assign(lockedOffice, { status: "not_requested", requestedAt: undefined });
+        lockedSession.clearance = lockedRecord;
+        const now = new Date().toISOString();
+        await tx.update(enrollmentSessions).set({ session: lockedSession, updatedAt: now }).where(eq(enrollmentSessions.studentId, targetId));
+        return { record: lockedRecord, requestedAt };
+      });
+      if ("error" in cancelled) return { code: cancelled.code ?? 409, message: cancelled.error };
       const roleForOffice = ({ dean: "DEAN", registrar: "REGISTRAR", sao: "SAO", library: "LIBRARY", accounting: "ACCOUNTING" }[office]) as typeof users.$inferSelect.role;
       await userRepository.ensureDemoStaffAccountsForRole(roleForOffice);
       const recipients = await db.select({ id: users.id, department: users.department }).from(users).where(eq(users.role, roleForOffice));
       const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "ADMIN"));
-      const officeRecipients = office === "dean" ? recipients.filter((u) => departmentMatches(u.department, String(record.program ?? ""))) : recipients;
-      const student = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, targetId)).limit(1);
-      const message = `${record.studentName} (${targetId}) cancelled the ${clearanceLabels[office]} clearance request.`;
+      const officeRecipients = office === "dean" ? recipients.filter((u) => departmentMatches(u.department, String(cancelled.record.program ?? ""))) : recipients;
+      const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, targetId)).limit(1);
+      const message = `${cancelled.record.studentName} (${targetId}) cancelled the ${clearanceLabels[office]} clearance request.`;
       await Promise.all([...new Set([...officeRecipients.map((u) => u.id), ...admins.map((u) => u.id)])].map((id) => notify(id, office, "Clearance request cancelled", message, `/admin/clearance-requests?office=${office}&student=${targetId}`, "warning")));
-      if (student[0]) await notify(student[0].id, office, "Clearance request cancelled", `Your ${clearanceLabels[office]} request was cancelled.`, "/student/clearance", "warning");
+      if (student) {
+        broadcastEnrollmentQueueUpdated(student.id);
+        await notify(student.id, office, "Clearance request cancelled", `Your ${clearanceLabels[office]} request was cancelled.`, "/student/clearance", "warning");
+      }
+      return { code: 200, data: { record: cancelled.record } };
     }
     else return { code: 400, message: "Unsupported student action." };
   } else {
@@ -924,6 +1279,14 @@ export async function updateClearance(actorId: string, role: string, studentId: 
     if (role === "DEAN") {
       const actor = await actorRecord(actorId);
       if (!departmentMatches(actor?.department ?? null, String(record.program ?? ""))) return { code: 403, message: "You can only review students in your assigned department." };
+    }
+    if (operation.action === "sign" || operation.action === "reject") {
+      const [active] = await db.select().from(signatureQueueProcessing).where(and(eq(signatureQueueProcessing.queueType, "office_signatures"), eq(signatureQueueProcessing.office, office))).limit(1);
+      if (active?.studentId && active.studentId !== targetId) return { code: 409, message: "Finish the request currently shown on the live board before handling another one." };
+      if (!active?.studentId) {
+        const started = await startSignatureQueueProcessing(actorId, role, "office_signatures", office, targetId);
+        if (started.code >= 400) return started;
+      }
     }
     if (operation.action === "revoke") {
       if (role !== "ADMIN" || current.status !== "signed") return { code: 409, message: "Only an administrator can revoke a completed signature." };
@@ -1001,5 +1364,8 @@ export async function updateClearance(actorId: string, role: string, studentId: 
   }
   session.clearance = record;
   await db.update(enrollmentSessions).set({ session, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, targetId));
+  if (["sign", "reject", "cancel", "revoke"].includes(String(operation.action))) {
+    await clearActiveSignatureProcessing("office_signatures", office, targetId);
+  }
   return { code: 200, data: { record } };
 }

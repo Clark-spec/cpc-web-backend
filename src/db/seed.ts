@@ -1,11 +1,22 @@
 ﻿import bcrypt from "bcrypt";
-import { eq } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { db } from "@/db";
 import { academicEvents, users } from "@/db/schema";
 import { SEED_ACADEMIC_EVENTS } from "@/db/academic-event-seed";
 
 async function seed() {
   console.log("🌱 Seeding CPC initial accounts...");
+
+  // Remove only the legacy, manually seeded student demo logins. Registrar-
+  // created student accounts use real numeric IDs and are left untouched.
+  const removedDemoStudents = await db.delete(users).where(and(
+    eq(users.role, "STUDENT"),
+    or(
+      and(eq(users.email, "student@cpc.edu.ph"), eq(users.studentNumber, "STU-2026-0042")),
+      and(eq(users.email, "maria.student@cpc.edu.ph"), eq(users.studentNumber, "STU-2026-0231")),
+    ),
+  )).returning({ email: users.email });
+  if (removedDemoStudents.length) console.log(`🧹 Removed ${removedDemoStudents.length} legacy demo student account(s).`);
 
   const defaultPassword = await bcrypt.hash("123456", 10);
 
@@ -86,26 +97,6 @@ async function seed() {
       password: defaultPassword,
       role: "CLINIC" as const,
       department: "Clinic",
-    },
-    {
-      name: "Harry Styles",
-      email: "student@cpc.edu.ph",
-      studentNumber: "STU-2026-0042",
-      password: defaultPassword,
-      role: "STUDENT" as const,
-      course: "Bachelor of Science in Information Technology",
-      yearLevel: 3,
-      department: "College of Computer Studies",
-    },
-    {
-      name: "Maria Santos",
-      email: "maria.student@cpc.edu.ph",
-      studentNumber: "STU-2026-0231",
-      password: defaultPassword,
-      role: "STUDENT" as const,
-      course: "Bachelor of Science in Hospitality Management",
-      yearLevel: 2,
-      department: "College of Hospitality Management",
     },
   ];
 

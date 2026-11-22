@@ -10,6 +10,10 @@ const csrf = new CsrfMiddleware();
 const roles = new RoleValidatorMiddleware();
 const controller = new EnrollmentController();
 
+router.get("/v1/signature-boards", controller.signatureBoards);
+router.post("/v1/signature-boards/start", auth.execute, csrf.execute, controller.startSignatureProcessing);
+router.post("/v1/signature-boards/finish", auth.execute, csrf.execute, controller.finishSignatureProcessing);
+
 router.get("/v1/sessions/mine", auth.execute, roles.validate("STUDENT"), controller.mine);
 router.post("/v1/sessions/verify", auth.execute, roles.validate("STUDENT"), csrf.execute, controller.verify);
 router.put("/v1/sessions/draft", auth.execute, roles.validate("STUDENT"), csrf.execute, controller.saveDraft);
@@ -25,6 +29,7 @@ router.delete("/v1/signatures/:signatureId", auth.execute, roles.validate("ADMIN
 router.get("/v1/clearance/mine", auth.execute, roles.validate("STUDENT"), controller.clearanceMine);
 router.get("/v1/clearance/records", auth.execute, roles.validate("ADMIN", "REGISTRAR", "DEAN", "SAO", "LIBRARY", "ACCOUNTING"), controller.clearanceList);
 router.post("/v1/clearance/mine/action", auth.execute, roles.validate("STUDENT"), csrf.execute, controller.clearanceUpdate);
+router.post("/v1/clearance/mine/request-many", auth.execute, roles.validate("STUDENT"), csrf.execute, controller.clearanceRequestMany);
 router.post("/v1/clearance/records/:studentId/action", auth.execute, roles.validate("ADMIN", "REGISTRAR", "DEAN", "SAO", "LIBRARY", "ACCOUNTING"), csrf.execute, controller.clearanceUpdate);
 
 export default router;

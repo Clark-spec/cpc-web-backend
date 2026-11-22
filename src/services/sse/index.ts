@@ -21,6 +21,10 @@ export function broadcastNotificationUpdated(userId: string) {
   broadcastToUser(userId, { event: "notification_updated", data: {} });
 }
 
+export function broadcastEnrollmentQueueUpdated(userId: string) {
+  broadcastToUser(userId, { event: "enrollment_queue_updated", data: {} });
+}
+
 /** Delivers a new bell item straight away, so the badge needs no refetch. */
 export function broadcastNotificationCreated(
   userId: string,

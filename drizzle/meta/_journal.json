@@ -113,6 +113,34 @@
       "when": 1795370000000,
       "tag": "0015_backfill_enrollment_and_staff_tables",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1795371000000,
+      "tag": "0016_signature_request_daily_count",
+      "breakpoints": true
+    },
+    {
+      "idx": 17,
+      "version": "7",
+      "when": 1795372000000,
+      "tag": "0017_clearance_signature_daily_count",
+      "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "7",
+      "when": 1795373000000,
+      "tag": "0018_signature_queue_processing",
+      "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1795374000000,
+      "tag": "0019_per_office_signature_queue_counts",
+      "breakpoints": true
     }
   ]
 }

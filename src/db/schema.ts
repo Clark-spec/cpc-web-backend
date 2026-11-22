@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, uuid, text, timestamp, integer, boolean, serial, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, uuid, text, timestamp, integer, boolean, serial, index, uniqueIndex, jsonb, primaryKey } from "drizzle-orm/pg-core";
 
 export const role = pgEnum("Role", [
   "USER",
@@ -377,6 +377,37 @@ export const enrollmentSessions = pgTable("enrollment_session", {
   session: jsonb("session").$type<Record<string, unknown>>().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
 }, (table) => [index("enrollment_session_updated_idx").on(table.updatedAt)]);
+
+/** Legacy shared Study Load counter retained for compatibility with older databases. */
+export const signatureRequestDailyCounts = pgTable("signature_request_daily_count", {
+  localDate: text("local_date").primaryKey(),
+  requestCount: integer("request_count").default(0).notNull(),
+});
+
+/** Legacy shared Office Signatures counter retained for older databases. */
+export const clearanceSignatureDailyCounts = pgTable("clearance_signature_daily_count", {
+  localDate: text("local_date").primaryKey(),
+  requestCount: integer("request_count").default(0).notNull(),
+});
+
+/** Independent daily limit and queue sequence for each workflow office. */
+export const signatureOfficeDailyCounts = pgTable("signature_office_daily_count", {
+  queueType: text("queue_type").notNull(),
+  office: text().notNull(),
+  localDate: text("local_date").notNull(),
+  requestCount: integer("request_count").default(0).notNull(),
+}, (table) => [primaryKey({ columns: [table.queueType, table.office, table.localDate] })]);
+
+/** One active signature request per office and workflow, without public identity data. */
+export const signatureQueueProcessing = pgTable("signature_queue_processing", {
+  queueType: text("queue_type").notNull(), // study_load | office_signatures
+  office: text().notNull(),
+  studentId: text("student_id"),
+  queueDate: text("queue_date"),
+  queueNumber: integer("queue_number"),
+  startedAt: timestamp("started_at", { withTimezone: true, mode: "string" }),
+  startedBy: text("started_by"),
+}, (table) => [primaryKey({ columns: [table.queueType, table.office] })]);
 
 export const queueTickets = pgTable("queue_ticket", {
   id: text().primaryKey(),

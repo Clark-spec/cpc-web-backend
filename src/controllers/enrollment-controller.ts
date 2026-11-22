@@ -10,7 +10,8 @@ import {
   signEnrollmentStep,
   submitEnrollmentSession,
   saveEnrollmentDraft,
-  getClearanceRecord, listClearanceRecords, updateClearance,
+  getClearanceRecord, listClearanceRecords, requestClearanceSignatures, updateClearance,
+  finishSignatureQueueProcessing, getPublicSignatureBoards, startSignatureQueueProcessing,
 } from "@/services/enrollment";
 import {
   createStaffSignature,
@@ -20,6 +21,17 @@ import {
 } from "@/services/staff-signatures";
 
 export class EnrollmentController {
+  public signatureBoards = async (_req: Request, res: Response) => sendResult(res, await getPublicSignatureBoards());
+  public startSignatureProcessing = async (req: Request, res: Response) => {
+    const user = (req as AuthenticatedRequest).user;
+    if (!user) return sendResult(res, { code: 401, message: "Please sign in." });
+    return sendResult(res, await startSignatureQueueProcessing(user.sub, user.role, req.body?.queueType, req.body?.office, String(req.body?.studentId ?? ""), req.body?.feePaidConfirmed === true));
+  };
+  public finishSignatureProcessing = async (req: Request, res: Response) => {
+    const user = (req as AuthenticatedRequest).user;
+    if (!user) return sendResult(res, { code: 401, message: "Please sign in." });
+    return sendResult(res, await finishSignatureQueueProcessing(user.sub, user.role, req.body?.queueType, req.body?.office, String(req.body?.studentId ?? "")));
+  };
   public savedSignatures = async (req: Request, res: Response) => {
     const user = (req as AuthenticatedRequest).user;
     if (!user) return sendResult(res, { code: 401, message: "Please sign in." });
@@ -42,6 +54,7 @@ export class EnrollmentController {
   };
   public clearanceMine = async (req: Request, res: Response) => { const u = (req as AuthenticatedRequest).user; if (!u) return sendResult(res, { code: 401, message: "Please sign in." }); return sendResult(res, await getClearanceRecord(u.sub, u.role)); };
   public clearanceList = async (req: Request, res: Response) => { const u = (req as AuthenticatedRequest).user; if (!u) return sendResult(res, { code: 401, message: "Please sign in." }); return sendResult(res, await listClearanceRecords(u.sub, u.role)); };
+  public clearanceRequestMany = async (req: Request, res: Response) => { const u = (req as AuthenticatedRequest).user; if (!u) return sendResult(res, { code: 401, message: "Please sign in." }); return sendResult(res, await requestClearanceSignatures(u.sub, req.body?.offices, req.body?.note)); };
   public clearanceUpdate = async (req: Request, res: Response) => { const u = (req as AuthenticatedRequest).user; if (!u) return sendResult(res, { code: 401, message: "Please sign in." }); return sendResult(res, await updateClearance(u.sub, u.role, req.params.studentId ?? null, req.body ?? {})); };
   public mine = async (req: Request, res: Response) => {
     const user = (req as AuthenticatedRequest).user;
