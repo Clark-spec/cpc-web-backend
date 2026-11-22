@@ -51,6 +51,40 @@ function mayHandleOffice(role: string, office: SignatureOffice) {
   return role === "ADMIN" || offices[office].role === role;
 }
 
+const fixedBSITThirdYearLoad: Snapshot[] = [
+  { id: "bsit3-im2", code: "IM 2", title: "Information Management 2", units: 3, schedule: "7:00 AM – 10:00 AM", days: "SAT", roomSetA: "LAB 1", roomSetB: "ONLINE", instructor: "E. Tajanlangit", active: true },
+  { id: "bsit3-hci1", code: "HCI 1", title: "Human Computer Interaction 1", units: 3, schedule: "10:00 AM – 11:00 AM", days: "MWF", roomSetA: "LAB 2", roomSetB: "ONLINE", instructor: "I. Eda", active: true },
+  { id: "bsit3-track-el2", code: "IT TRACK EL 2", title: "Fundamentals of Business Analytics", units: 3, schedule: "10:00 AM – 1:00 PM", days: "SAT", roomSetA: "TENT 2", roomSetB: "ONLINE", instructor: "A. Entrena", active: true },
+  { id: "bsit3-os", code: "OS", title: "Operating System", units: 3, schedule: "12:00 PM – 1:00 PM", days: "TTh", roomSetA: "LAB 2", roomSetB: "ONLINE", instructor: "T. Comayas", active: true },
+  { id: "bsit3-it-elec2", code: "IT ELEC 2", title: "Object Oriented Programming 2", units: 3, schedule: "1:00 PM – 2:00 PM", days: "MWF", roomSetA: "LAB 1", roomSetB: "ONLINE", instructor: "I. Eda", active: true },
+  { id: "bsit3-soc-sci1", code: "SOC SCI 1", title: "Phil Constitution and Government", units: 3, schedule: "1:30 PM – 3:00 PM", days: "TTh", roomSetA: "302", roomSetB: "ONLINE", instructor: "J. Cadungog", active: true },
+  { id: "bsit3-ias1", code: "IAS 1", title: "Information Assurance and Security 1", units: 3, schedule: "3:00 PM – 4:30 PM", days: "TTh", roomSetA: "LAB 3", roomSetB: "ONLINE", instructor: "B. Empaces", active: true },
+  { id: "bsit3-appsdev", code: "APPSDEV", title: "Application Development", units: 3, schedule: "4:00 PM – 7:00 PM", days: "SAT", roomSetA: "LAB 1", roomSetB: "ONLINE", instructor: "A. Batoon", active: true },
+  { id: "bsit3-net2", code: "NET 2", title: "Networking 2", units: 3, schedule: "4:30 PM – 6:00 PM", days: "TTh", roomSetA: "LAB 2", roomSetB: "ONLINE", instructor: "T. Comayas", active: true },
+];
+
+function academicYearAfter(value: string) {
+  const match = value.match(/(\d{4})\s*[-–]\s*(\d{4})/);
+  return match ? `${Number(match[1]) + 1}-${Number(match[2]) + 1}` : "2026-2027";
+}
+
+function nextEnrollmentPlan(record: Snapshot, section: string) {
+  const normalizedDepartment = String(record.department ?? "").toUpperCase();
+  const currentSection = section.trim().toUpperCase();
+  const bsitYearTwo = normalizedDepartment.includes("BSIT") && Number(record.yearLevel) === 2 && /^BSIT-2[A-D]$/.test(currentSection);
+  if (!bsitYearTwo) {
+    return { yearLevel: Number(record.yearLevel) || 1, section: currentSection, term: "2nd Semester 2025-2026", subjects: [] as Snapshot[], promote: false };
+  }
+  const academicYear = academicYearAfter(String(record.lastTermEnrolled ?? ""));
+  return {
+    yearLevel: 3,
+    section: currentSection.replace("BSIT-2", "BSIT-3"),
+    term: `1st Semester ${academicYear}`,
+    subjects: fixedBSITThirdYearLoad.map((subject) => ({ ...subject })),
+    promote: true,
+  };
+}
+
 async function notify(userId: string, officeId: string, title: string, message: string, href: string, type: "info" | "success" | "warning" = "info") {
   const [item] = await db.insert(notifications).values({ userId, officeId, title, message, href, type }).returning();
   if (item) broadcastNotificationCreated(item.userId, {
@@ -360,11 +394,61 @@ export async function getOwnEnrollmentSession(actorId: string) {
   if (!studentId) return { code: 404, message: "Student enrollment record was not found." };
   const [row] = await db.select({ session: enrollmentSessions.session }).from(enrollmentSessions)
     .where(eq(enrollmentSessions.studentId, studentId)).limit(1);
-  if (row) return { code: 200, data: { session: row.session } };
-
   const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, studentId)).limit(1);
   if (!record) return { code: 404, message: "Student masterlist record was not found." };
   const [account] = await db.select({ section: users.section }).from(users).where(eq(users.id, actorId)).limit(1);
+  if (row) {
+    const existing = row.session as Snapshot;
+    const currentStudent = {
+      ...(existing.student ?? {}),
+      studentIdNo: record.studentIdNo,
+      section: existing.student?.section ?? account?.section ?? "",
+      name: record.name,
+      department: record.department,
+      course: record.course,
+      yearLevel: record.yearLevel,
+      semester: record.semester,
+      standing: record.standing,
+      lastTermEnrolled: record.lastTermEnrolled,
+      isEligible: record.isEligible,
+    };
+    const plan = nextEnrollmentPlan(record, String(currentStudent.section ?? ""));
+    const makeStep = (id: string, stepName: string, label: string, office: string, status: string) => ({ id, stepName, label, office, status });
+    const defaultSteps = {
+      verification: makeStep("step-0", "verification", "Verification & Standing", "Registrar", "PENDING"),
+      clearance: makeStep("step-1", "clearance", "Online Clearance Check", "Online Clearance", "LOCKED"),
+      enrollment_form: makeStep("step-2", "enrollment_form", "Enrollment Form", "Student", "LOCKED"),
+      screening: makeStep("step-3", "screening", "Screening Committee Approval", "Department Dean", "LOCKED"),
+      guidance: makeStep("step-4", "guidance", "Guidance Office Approval", "Guidance", "LOCKED"),
+      queue_ticket: makeStep("step-5", "queue_ticket", "Department Queue Number", "Registrar / Automated", "LOCKED"),
+      clinic: makeStep("step-6", "clinic", "Clinic Health Assessment", "Clinic", "LOCKED"),
+      accounting: makeStep("step-7", "accounting", "Accounting Fee Assessment", "Accounting", "LOCKED"),
+      registrar: makeStep("step-8", "registrar", "Registrar Final Registration", "Registrar", "LOCKED"),
+    };
+    const form = existing.form ?? {
+      id: `form-${studentId}`, studentId, studentName: record.name, department: record.department, course: record.course,
+      yearLevel: plan.yearLevel, section: plan.section, term: plan.term,
+      type: record.standing === "regular" ? "preprinted" : "blank", standing: record.standing,
+      subjects: plan.subjects, totalUnits: plan.subjects.reduce((sum, item) => sum + Number(item.units || 0), 0), status: "DRAFT",
+    };
+    const clearance = normalizeClearance(existing.clearance, currentStudent);
+    const clearanceComplete = clearance.offices.length === clearanceOffices.length && clearance.offices.every((office: Snapshot) => office.status === "signed");
+    const nextSession: Snapshot = {
+      ...existing,
+      student: currentStudent,
+      steps: { ...defaultSteps, ...(existing.steps ?? {}) },
+      form: plan.promote && ["DRAFT", "RESUBMIT"].includes(String(form.status))
+        ? { ...form, yearLevel: plan.yearLevel, section: plan.section, term: plan.term, subjects: plan.subjects, totalUnits: plan.subjects.reduce((sum, item) => sum + Number(item.units || 0), 0) }
+        : form,
+      signatureRequests: existing.signatureRequests ?? {},
+      clearance,
+    };
+    if (clearanceComplete) nextSession.steps.clearance = { ...nextSession.steps.clearance, status: "APPROVED", updatedAt: clearance.completedAt };
+    if (!existing.steps || !existing.form || !existing.clearance || plan.promote) {
+      await db.update(enrollmentSessions).set({ session: nextSession, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, studentId));
+    }
+    return { code: 200, data: { session: nextSession } };
+  }
   const student = {
     studentIdNo: record.studentIdNo,
     section: account?.section ?? "",
@@ -377,6 +461,7 @@ export async function getOwnEnrollmentSession(actorId: string) {
     lastTermEnrolled: record.lastTermEnrolled,
     isEligible: record.isEligible,
   };
+  const plan = nextEnrollmentPlan(record, student.section);
   const makeStep = (id: string, stepName: string, label: string, office: string, status: string) => ({ id, stepName, label, office, status });
   const session: Snapshot = {
     student,
@@ -397,15 +482,17 @@ export async function getOwnEnrollmentSession(actorId: string) {
       studentName: record.name,
       department: record.department,
       course: record.course,
-      yearLevel: record.yearLevel,
-      term: "2nd Semester 2025-2026",
+      yearLevel: plan.yearLevel,
+      section: plan.section,
+      term: plan.term,
       type: record.standing === "regular" ? "preprinted" : "blank",
       standing: record.standing,
-      subjects: [],
-      totalUnits: 0,
+      subjects: plan.subjects,
+      totalUnits: plan.subjects.reduce((sum, subject) => sum + Number(subject.units || 0), 0),
       status: "DRAFT",
     },
     signatureRequests: {},
+    clearance: initialClearance(student),
   };
   await db.insert(enrollmentSessions).values({ studentId, session }).onConflictDoNothing();
   const [saved] = await db.select({ session: enrollmentSessions.session }).from(enrollmentSessions)
@@ -438,16 +525,23 @@ export async function saveEnrollmentDraft(actorId: string, input: unknown) {
   const [row] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
   if (!row) return { code: 404, message: "Enrollment session was not found." };
   const session = row.session as Snapshot;
+  const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, studentId)).limit(1);
+  if (!record) return { code: 404, message: "Student masterlist record was not found." };
+  const plan = nextEnrollmentPlan(record, String(session.student?.section ?? ""));
+  const clearance = normalizeClearance(session.clearance, session.student ?? {});
+  const clearanceComplete = clearance.offices.length === clearanceOffices.length && clearance.offices.every((office: Snapshot) => office.status === "signed");
+  if (!clearanceComplete) return { code: 409, message: "Complete all five Online Clearance signatures before saving the Study Load." };
   if (!session?.steps?.verification || session.steps.verification.status !== "APPROVED") {
     return { code: 409, message: "Confirm your Registrar record before editing the Study Load." };
   }
   if (!["DRAFT", "RESUBMIT"].includes(String(session.form?.status))) {
     return { code: 409, message: "The submitted Study Load can no longer be edited." };
   }
-  const subjects = input && typeof input === "object" && Array.isArray((input as Snapshot).subjects)
+  const submittedSubjects = input && typeof input === "object" && Array.isArray((input as Snapshot).subjects)
     ? (input as Snapshot).subjects as Snapshot[]
     : null;
-  if (!subjects || subjects.length > 24) return { code: 400, message: "Provide a valid Study Load with no more than 24 subjects." };
+  if (!submittedSubjects || submittedSubjects.length > 24) return { code: 400, message: "Provide a valid Study Load with no more than 24 subjects." };
+  const subjects = plan.promote ? plan.subjects : submittedSubjects;
   for (const subject of subjects) {
     if (typeof subject.code !== "string" || !subject.code.trim() || typeof subject.title !== "string" || !subject.title.trim() || !Number.isFinite(Number(subject.units)) || Number(subject.units) <= 0) {
       return { code: 400, message: "Each subject needs a code, title, and valid unit count." };
@@ -456,11 +550,12 @@ export async function saveEnrollmentDraft(actorId: string, input: unknown) {
   const totalUnits = subjects.reduce((sum, subject) => sum + Number(subject.units), 0);
   const maximumUnits = session.form.standing === "regular" ? 27 : 24;
   if (totalUnits > maximumUnits) return { code: 400, message: `The Study Load cannot exceed ${maximumUnits} units.` };
-  session.form = { ...session.form, subjects, totalUnits };
-  if ((input as Snapshot).clearanceComplete === true) {
+  session.form = { ...session.form, yearLevel: plan.yearLevel, section: plan.section, term: plan.term, subjects, totalUnits };
+  if (clearanceComplete) {
     session.steps.clearance = { ...session.steps.clearance, status: "APPROVED", updatedAt: new Date().toISOString() };
     session.steps.enrollment_form = { ...session.steps.enrollment_form, status: "PENDING" };
   }
+  session.clearance = clearance;
   const now = new Date().toISOString();
   await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
   return { code: 200, data: { session } };
@@ -503,10 +598,15 @@ export async function submitEnrollmentSession(actorId: string, input: unknown) {
   const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, studentId)).limit(1);
   if (!record) return { code: 404, message: "Student masterlist record was not found." };
   const [account] = await db.select({ section: users.section }).from(users).where(eq(users.id, actorId)).limit(1);
+  const plan = nextEnrollmentPlan(record, account?.section ?? "");
   const [savedRow] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
   if (!savedRow) return { code: 409, message: "Verify your Registrar record before submitting the Study Load." };
   const savedSession = savedRow.session as Snapshot;
   if (savedSession.steps?.verification?.status !== "APPROVED") return { code: 409, message: "Confirm your Registrar record before submitting the Study Load." };
+  const clearance = normalizeClearance(savedSession.clearance, savedSession.student ?? {});
+  if (clearance.offices.length !== clearanceOffices.length || !clearance.offices.every((office: Snapshot) => office.status === "signed")) {
+    return { code: 409, message: "Complete all five Online Clearance signatures before submitting the Study Load." };
+  }
   if (!["DRAFT", "RESUBMIT"].includes(String(savedSession.form?.status))) {
     return { code: 409, message: "This Study Load has already been submitted." };
   }
@@ -540,7 +640,9 @@ export async function submitEnrollmentSession(actorId: string, input: unknown) {
       studentName: record.name,
       department: record.department,
       course: record.course,
-      yearLevel: record.yearLevel,
+      yearLevel: plan.yearLevel,
+      section: plan.section,
+      term: plan.term,
       status: "SUBMITTED",
       subjects,
       totalUnits,
@@ -626,6 +728,7 @@ export async function signEnrollmentStep(actorId: string, role: string, studentI
   if (!row) return { code: 404, message: "Enrollment Study Load was not found." };
   const session = row.session as Snapshot;
   if (!session.signatureRequests?.[office]) return { code: 409, message: "The student has not requested this office's signature." };
+  if (session.steps?.[office]?.status === "APPROVED") return { code: 409, message: "This office has already signed the Study Load." };
   const signature = signatureInput && typeof signatureInput === "object" ? signatureInput as Snapshot : {};
   const imageBase64 = typeof signature.imageBase64 === "string" ? signature.imageBase64 : "";
   const signatureMethod = signature.method;
@@ -653,7 +756,6 @@ export async function signEnrollmentStep(actorId: string, role: string, studentI
     session.screeningFeePaidAt = now;
     session.screeningFeeVerifiedBy = actor?.name ?? role;
   }
-  await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
   const requestedAt = String(session.signatureRequests[office]);
   await Promise.all([
     updateOfficeSignatureNotice(studentId, String(session.student?.name ?? studentId), office, requestedAt, "signed"),
@@ -661,7 +763,33 @@ export async function signEnrollmentStep(actorId: string, role: string, studentI
   ]).catch((error) => console.error("Could not update enrollment signature notifications", error));
   const allSigned = (["screening", "guidance", "clinic", "accounting", "registrar"] as SignatureOffice[]).every((key) => session.steps?.[key]?.status === "APPROVED");
   if (allSigned) {
+    const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, studentId)).limit(1);
+    if (record) {
+      const [account] = await db.select({ section: users.section }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+      const plan = nextEnrollmentPlan(record, String(account?.section ?? session.student?.section ?? ""));
+      if (plan.promote) {
+        session.student = {
+          ...session.student,
+          section: plan.section,
+          yearLevel: plan.yearLevel,
+          semester: 1,
+          lastTermEnrolled: plan.term,
+        };
+        session.form = { ...session.form, section: plan.section, yearLevel: plan.yearLevel, term: plan.term, status: "APPROVED" };
+        await db.transaction(async (tx) => {
+          await tx.update(masterlist).set({ yearLevel: plan.yearLevel, semester: 1, lastTermEnrolled: plan.term, isEligible: true }).where(eq(masterlist.studentIdNo, studentId));
+          await tx.update(users).set({ section: plan.section, yearLevel: plan.yearLevel, course: record.course, department: record.department }).where(eq(users.studentNumber, studentId));
+          await tx.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+        });
+      } else {
+        await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+      }
+    } else {
+      await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
+    }
     await notifyStudent(studentId, office, "You are officially enrolled", `All five offices signed your Study Load for ${session.form?.term ?? "this term"}.`, "success");
+  } else {
+    await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
   }
   return { code: 200, data: { session, allSigned } };
 }
@@ -693,7 +821,20 @@ function normalizeClearance(value: Snapshot | undefined, student: Snapshot) {
   const savedEvents = Array.isArray(value?.saoEvents) && value.saoEvents.length > 0 ? value.saoEvents : base.saoEvents;
   const saoSigned = base.offices.some((office) => office.office === "sao" && office.status === "signed");
   const saoEvents = savedEvents.map((event: Snapshot) => ({ ...event, attended: saoSigned || event.attended === true }));
-  return { ...base, ...(value ?? {}), offices: base.offices, saoEvents, studentId: student.studentIdNo ?? value?.studentId, studentName: student.name ?? value?.studentName, section: student.section ?? value?.section, program: student.course ?? value?.program };
+  const allSigned = base.offices.length === clearanceOffices.length && base.offices.every((office) => office.status === "signed");
+  return {
+    ...base,
+    ...(value ?? {}),
+    offices: base.offices,
+    saoEvents,
+    studentId: value?.studentId ?? student.studentIdNo,
+    studentName: value?.studentName ?? student.name,
+    section: value?.section ?? student.section,
+    program: value?.program ?? student.course,
+    yearLevel: value?.yearLevel ?? student.yearLevel,
+    history: Array.isArray(value?.history) ? value.history : [],
+    ...(allSigned && !value?.completedAt ? { completedAt: base.offices.map((office) => office.respondedAt).filter(Boolean).sort().at(-1) } : {}),
+  };
 }
 async function clearanceRow(studentId: string) {
   const [row] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
@@ -821,7 +962,26 @@ export async function updateClearance(actorId: string, role: string, studentId: 
         operation.action === "sign" ? "signed" : "rejected",
       );
     }
-    if (record.offices.every((o: Snapshot) => o.status === "signed")) record.completedAt = new Date().toISOString();
+    if (record.offices.every((o: Snapshot) => o.status === "signed")) {
+      if (!record.completedAt) record.completedAt = new Date().toISOString();
+      const history = Array.isArray(record.history) ? record.history as Snapshot[] : [];
+      if (!history.some((entry) => entry.academicYear === record.academicYear && entry.semester === record.term)) {
+        record.history = [...history, {
+          academicYear: record.academicYear,
+          semester: record.term,
+          status: "Cleared",
+          dateCleared: record.completedAt,
+          section: record.section,
+          program: record.program,
+          yearLevel: record.yearLevel,
+          signatures: record.offices,
+        }];
+      }
+      session.steps = {
+        ...session.steps,
+        clearance: { ...session.steps?.clearance, status: "APPROVED", updatedAt: record.completedAt },
+      };
+    }
     const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, targetId)).limit(1);
     if (student) {
       const resultLabel = current.status === "signed" ? "signed" : current.status === "rejected" ? "rejected" : "pending";
