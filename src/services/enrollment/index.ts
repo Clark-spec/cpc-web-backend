@@ -1,6 +1,6 @@
 import { and, eq, gte, inArray } from "drizzle-orm";
 import { db } from "@/db";
-import { enrollmentSessions, masterlist, notifications, signatureOfficeDailyCounts, signatureQueueProcessing, users } from "@/db/schema";
+import { enrollmentSessions, gradeRecords, masterlist, notifications, signatureOfficeDailyCounts, signatureQueueProcessing, users } from "@/db/schema";
 import { broadcastEnrollmentQueueUpdated, broadcastNotificationCreated, broadcastNotificationUpdated } from "@/services/sse";
 import { UserRepository } from "@/repositories/user-repository";
 
@@ -1049,6 +1049,9 @@ export async function signEnrollmentStep(actorId: string, role: string, studentI
 const clearanceOffices = ["dean", "sao", "library", "accounting", "registrar"] as const;
 type ClearanceOffice = typeof clearanceOffices[number];
 const clearanceLabels: Record<ClearanceOffice, string> = { dean: "Dean", sao: "SAO / SSG Adviser", library: "Library", accounting: "Accounting", registrar: "Registrar" };
+const BSIT_2A_GRADE_TERM = "2nd Semester · AY 2025-2026";
+const BSIT_2A_GRADE_CODES = ["F3-DANCE", "F3-READING-VISUAL-ARTS", "F3-SCIENCE-TECHNOLOGY-SOCIETY", "F3-INFORMATION-MANAGEMENT", "F3-IT-TRACK-ELECTIVE-1", "F3-OBJECT-ORIENTED-PROGRAMMING", "F3-PROBABILITIES-STATISTICS", "F3-DATA-COMMUNICATIONS-NETWORKING-1", "F3-QUANTITATIVE-METHODS"];
+function matchesB2A(section: string | null | undefined) { return String(section ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "") === "BSIT2A"; }
 const defaultSaoEvents = [
   { title: "Brigada Balik Eskwela", attended: false },
   { title: "Foundation Day", attended: false },
@@ -1174,6 +1177,24 @@ export async function requestClearanceSignatures(actorId: string, officeInputs: 
     const session = lockedRow.session as Snapshot;
     const record = normalizeClearance(session.clearance, session.student ?? {});
     if (!record.periodOpen) return { error: "The Office Signatures request period is closed." };
+    if (offices.includes("registrar")) {
+      const [studentAccount] = await tx.select({ section: users.section }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
+      const section = studentAccount?.section ?? record.section ?? "";
+      const term = matchesB2A(section) ? BSIT_2A_GRADE_TERM : "1st Semester · AY 2026-2027";
+      const grades = await tx.select({ subjectCode: gradeRecords.subjectCode, grade: gradeRecords.grade, acknowledgedAt: gradeRecords.acknowledgedAt })
+        .from(gradeRecords).where(and(eq(gradeRecords.studentUserId, actorId), eq(gradeRecords.term, term)));
+      if (matchesB2A(section)) {
+        const byCode = new Map(grades.map((grade) => [grade.subjectCode, grade]));
+        if (BSIT_2A_GRADE_CODES.some((code) => !byCode.get(code)?.grade || !byCode.get(code)?.acknowledgedAt)) {
+          return { error: "The Registrar clearance request is available after all nine BSIT-2A Form 3 grades are posted and acknowledged." };
+        }
+      } else {
+        const postedGrades = grades.filter((grade) => Boolean(grade.grade));
+        if (!postedGrades.length || postedGrades.some((grade) => !grade.acknowledgedAt)) {
+          return { error: "The Registrar clearance request is available after your grades are posted and acknowledged." };
+        }
+      }
+    }
     const selected = offices.map((office) => record.offices.find((entry: Snapshot) => entry.office === office) as Snapshot);
     if (selected.some((entry) => !entry || entry.status === "signed" || entry.status === "requested")) {
       return { error: "One or more selected Office Signature requests are no longer available." };
@@ -1293,7 +1314,10 @@ export async function updateClearance(actorId: string, role: string, studentId: 
     if (operation.action === "sign" || operation.action === "reject") {
       const [active] = await db.select().from(signatureQueueProcessing).where(and(eq(signatureQueueProcessing.queueType, "office_signatures"), eq(signatureQueueProcessing.office, office))).limit(1);
       if (active?.studentId && active.studentId !== targetId) return { code: 409, message: "Finish the request currently shown on the live board before handling another one." };
-      if (!active?.studentId) {
+      if (operation.action === "sign" && active?.studentId !== targetId) {
+        return { code: 409, message: "Start processing this request before reviewing and signing it." };
+      }
+      if (operation.action === "reject" && !active?.studentId) {
         const started = await startSignatureQueueProcessing(actorId, role, "office_signatures", office, targetId);
         if (started.code >= 400) return started;
       }
@@ -1379,3 +1403,4 @@ export async function updateClearance(actorId: string, role: string, studentId: 
   }
   return { code: 200, data: { record } };
 }
+
