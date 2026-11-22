@@ -1,6 +1,6 @@
 import { eq, or, inArray, and } from "drizzle-orm";
 import { db } from "@/db";
-import { users, role, masterlist } from "@/db/schema";
+import { users, role, masterlist, studentProfiles } from "@/db/schema";
 import type { SignupInput } from "@/schema/auth-schema";
 import { randomUUID } from "node:crypto";
 
@@ -191,6 +191,38 @@ export const memUsers: FallbackUser[] = [
     updatedAt: new Date().toISOString(),
     emailVerified: new Date().toISOString(),
   },
+  {
+    id: "b3333333-3333-3333-3333-333333333333",
+    name: "Mrs. Grace Tan",
+    email: "guidance@cpc.edu.ph",
+    studentNumber: null,
+    password: DEFAULT_HASH,
+    role: "GUIDANCE",
+    course: null,
+    yearLevel: null,
+    department: "Guidance Office",
+    phone: null,
+    avatarUrl: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    emailVerified: new Date().toISOString(),
+  },
+  {
+    id: "b4444444-4444-4444-4444-444444444444",
+    name: "Dr. Arthur Morales",
+    email: "clinic@cpc.edu.ph",
+    studentNumber: null,
+    password: DEFAULT_HASH,
+    role: "CLINIC",
+    course: null,
+    yearLevel: null,
+    department: "Clinic",
+    phone: null,
+    avatarUrl: null,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    emailVerified: new Date().toISOString(),
+  },
 ];
 
 const memContinuingRecords: Array<{
@@ -357,11 +389,16 @@ export class UserRepository {
     course: string;
     yearLevel: number;
     lastTermEnrolled: string;
+    gender: string;
+    dateOfBirth: string;
   }) {
     const values = {
       name: input.name,
       studentNumber: input.studentNumber,
       section: input.section,
+      course: input.course,
+      yearLevel: input.yearLevel,
+      department: input.department,
       email: null,
       password: input.password,
       role: "STUDENT" as const,
@@ -382,6 +419,11 @@ export class UserRepository {
         standing: "regular",
         lastTermEnrolled: input.lastTermEnrolled,
         isEligible: true,
+      });
+      await tx.insert(studentProfiles).values({
+        userId: user.id,
+        gender: input.gender,
+        dateOfBirth: input.dateOfBirth,
       });
       return user;
     });
@@ -409,9 +451,46 @@ export class UserRepository {
 
   async findContinuingRecordByUserId(userId: string) {
     try {
-      const [user] = await db.select({ studentNumber: users.studentNumber, section: users.section }).from(users).where(eq(users.id, userId)).limit(1);
+      const [user] = await db.select({
+        studentNumber: users.studentNumber,
+        section: users.section,
+        name: users.name,
+        role: users.role,
+        course: users.course,
+        yearLevel: users.yearLevel,
+        department: users.department,
+      }).from(users).where(eq(users.id, userId)).limit(1);
       if (!user?.studentNumber) return null;
-      const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, user.studentNumber)).limit(1);
+
+      let [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, user.studentNumber)).limit(1);
+
+      // Older registrar-created accounts may predate the transaction that
+      // writes the continuing-student masterlist. Rebuild that missing row
+      // from the account's Registrar-assigned ID and section.
+      const normalizedId = Number(user.studentNumber);
+      const sectionMatch = /^(BSIT|BEED|BSHM)-?([1-4])([A-Z])$/i.exec((user.section ?? "").replace(/\s+/g, ""));
+      if (!record && user.role === "STUDENT" && /^\d{8}$/.test(user.studentNumber) && normalizedId >= 20240770 && sectionMatch) {
+        const department = sectionMatch[1].toUpperCase();
+        const yearLevel = user.yearLevel ?? Number(sectionMatch[2]);
+        const course = user.course ?? ({
+          BSIT: "BS Information Technology",
+          BEED: "Bachelor of Elementary Education",
+          BSHM: "BS Hospitality Management",
+        } as const)[department as "BSIT" | "BEED" | "BSHM"];
+        const [created] = await db.insert(masterlist).values({
+          studentIdNo: user.studentNumber,
+          name: user.name,
+          department: user.department ?? department,
+          course,
+          yearLevel,
+          semester: 2,
+          standing: "regular",
+          lastTermEnrolled: "2025-2026 2nd Semester",
+          isEligible: true,
+        }).onConflictDoNothing().returning();
+        record = created ?? (await db.select().from(masterlist).where(eq(masterlist.studentIdNo, user.studentNumber)).limit(1))[0];
+      }
+
       return record ? { ...record, section: user.section ?? "" } : null;
     } catch {
       const user = memUsers.find((entry) => entry.id === userId);
@@ -508,6 +587,58 @@ export class UserRepository {
       return { id: found.id, email: found.email, emailVerified: found.emailVerified };
     }
     return null;
+  }
+
+  async updateStudentName(userId: string, name: string) {
+    try {
+      const updated = await db.transaction(async (tx) => {
+        const [student] = await tx.update(users).set({ name, updatedAt: new Date().toISOString() })
+          .where(eq(users.id, userId)).returning(publicUserFields);
+        if (student?.studentNumber) {
+          await tx.update(masterlist).set({ name }).where(eq(masterlist.studentIdNo, student.studentNumber));
+        }
+        return student;
+      });
+      if (updated) return updated;
+    } catch {
+      // Fall through to memory.
+    }
+    const found = memUsers.find((user) => user.id === userId);
+    if (!found) return null;
+    found.name = name;
+    found.updatedAt = new Date().toISOString();
+    const { password: _password, ...publicUser } = found;
+    void _password;
+    return publicUser as any;
+  }
+
+  async updateStudentEmail(userId: string, email: string) {
+    try {
+      const [updated] = await db.update(users).set({ email, emailVerified: null, updatedAt: new Date().toISOString() })
+        .where(eq(users.id, userId)).returning(publicUserFields);
+      if (updated) return updated;
+    } catch (error) {
+      if ((error as { code?: string })?.code === "23505") {
+        const conflict = new Error("That email address is already used by another account.");
+        Object.assign(conflict, { code: 409 });
+        throw conflict;
+      }
+      // Fall through to memory when no database row is available.
+    }
+    const found = memUsers.find((user) => user.id === userId);
+    if (!found) return null;
+    const duplicate = memUsers.some((user) => user.id !== userId && user.email?.toLowerCase() === email.toLowerCase());
+    if (duplicate) {
+      const conflict = new Error("That email address is already used by another account.");
+      Object.assign(conflict, { code: 409 });
+      throw conflict;
+    }
+    found.email = email;
+    found.emailVerified = null;
+    found.updatedAt = new Date().toISOString();
+    const { password: _password, ...publicUser } = found;
+    void _password;
+    return publicUser as any;
   }
 
   async updateAvatarUrl(userId: string, avatarUrl: string) {

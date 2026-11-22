@@ -14,8 +14,8 @@ export class StudentAccountController {
     sendResult(res, await listStudentAccountsService());
 
   public create = async (req: Request, res: Response) => {
-    const { name, section } = req.body ?? {};
-    return sendResult(res, await createStudentAccountService(name, section));
+    const { name, section, gender, dateOfBirth } = req.body ?? {};
+    return sendResult(res, await createStudentAccountService(name, section, gender, dateOfBirth));
   };
 
   public delete = async (req: Request, res: Response) =>

@@ -141,6 +141,20 @@
       "when": 1795374000000,
       "tag": "0019_per_office_signature_queue_counts",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1795390000000,
+      "tag": "0020_profile_correction_requests",
+      "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1795400000000,
+      "tag": "0021_profile_correction_attachments",
+      "breakpoints": true
     }
   ]
 }

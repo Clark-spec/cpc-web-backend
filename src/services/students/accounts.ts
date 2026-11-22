@@ -25,7 +25,7 @@ export async function deleteStudentAccountService(userId: string) {
   }
 }
 
-export async function createStudentAccountService(name: string, section: string) {
+export async function createStudentAccountService(name: string, section: string, gender: string, dateOfBirth: string) {
   try {
     const students = await userRepository.listStudents();
     const highest = students.reduce((max, student) => {
@@ -46,6 +46,7 @@ export async function createStudentAccountService(name: string, section: string)
     const lastTermEnrolled = "2025-2026 2nd Semester";
     const created = await userRepository.createRegistrarStudent({
       name: name.trim(), section: section.trim(), studentNumber,
+      gender, dateOfBirth,
       password: await bcrypt.hash(DEFAULT_PASSWORD, 10),
       department, course, yearLevel, lastTermEnrolled,
     });

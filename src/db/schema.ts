@@ -95,6 +95,33 @@ export const studentProfiles = pgTable("student_profile", {
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
 });
 
+export const profileCorrectionRequests = pgTable("profile_correction_request", {
+  id: uuid().defaultRandom().primaryKey(),
+  referenceNumber: text("reference_number").notNull().unique(),
+  studentUserId: uuid("student_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  studentId: text("student_id").notNull(),
+  studentName: text("student_name").notNull(),
+  course: text().notNull().default("BSIT"),
+  year: integer().notNull().default(1),
+  section: text().notNull().default(""),
+  email: text().notNull().default(""),
+  field: text().notNull(),
+  currentValue: text("current_value").notNull().default(""),
+  requestedValue: text("requested_value").notNull(),
+  reason: text().notNull(),
+  attachmentName: text("attachment_name"),
+  attachmentType: text("attachment_type"),
+  attachmentData: text("attachment_data"),
+  submittedAt: timestamp("submitted_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+  status: text().notNull().default("pending"),
+  adminRemarks: text("admin_remarks").notNull().default(""),
+  reviewedAt: timestamp("reviewed_at", { withTimezone: true, mode: "string" }),
+  reviewedById: uuid("reviewed_by_id").references(() => users.id, { onDelete: "set null" }),
+}, (table) => [
+  index("profile_correction_student_idx").on(table.studentUserId, table.submittedAt),
+  index("profile_correction_status_idx").on(table.status, table.submittedAt),
+]);
+
 // ─── Service Requests ────────────────────────────────────────────────────────
 
 export const services = pgTable("service", {

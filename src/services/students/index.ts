@@ -62,6 +62,7 @@ export const updateProfileService = async (
   userId: string,
   patch: Partial<{
     phone: string;
+    email: string;
     alternateContact: string;
     street: string;
     barangay: string;
@@ -85,17 +86,29 @@ export const updateProfileService = async (
       return { code: 404, status: "error", message: "User not found" };
     }
 
-    if ((patch as any).avatarUrl) {
-      await profileRepo.updateAvatarUrl(userId, (patch as any).avatarUrl);
+    const { email, avatarUrl, ...profilePatch } = patch as typeof patch & { email?: string; avatarUrl?: string };
+    if (email !== undefined) {
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim())) {
+        return { code: 400, status: "error", message: "Enter a valid email address." };
+      }
+      const updated = await userRepo.updateStudentEmail(userId, email.trim().toLowerCase());
+      if (!updated) return { code: 404, status: "error", message: "User not found" };
     }
 
-    await profileRepo.upsert(userId, patch);
+    if (avatarUrl) {
+      await profileRepo.updateAvatarUrl(userId, avatarUrl);
+    }
+
+    await profileRepo.upsert(userId, profilePatch);
     broadcastProfileUpdated(userId);
 
     // Return the full updated profile shape
     return getProfileService(userId);
   } catch (error) {
     console.error("updateProfileService Error:", error);
+    if ((error as { code?: number })?.code === 409) {
+      return { code: 409, status: "error", message: (error as Error).message };
+    }
     return { code: 500, status: "error", message: "Failed to update profile" };
   }
 };

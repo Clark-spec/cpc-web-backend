@@ -587,10 +587,11 @@ export async function getOwnEnrollmentSession(actorId: string) {
       isEligible: record.isEligible,
     };
     const plan = nextEnrollmentPlan(record, String(currentStudent.section ?? ""));
+    const registrarCreatedStudent = /^\d{8}$/.test(studentId) && Number(studentId) >= 20240770;
     const makeStep = (id: string, stepName: string, label: string, office: string, status: string) => ({ id, stepName, label, office, status });
     const defaultSteps = {
-      verification: makeStep("step-0", "verification", "Verification & Standing", "Registrar", "PENDING"),
-      clearance: makeStep("step-1", "clearance", "Online Clearance Check", "Online Clearance", "LOCKED"),
+      verification: makeStep("step-0", "verification", "Verification & Standing", "Registrar", registrarCreatedStudent ? "APPROVED" : "PENDING"),
+      clearance: makeStep("step-1", "clearance", "Online Clearance Check", "Online Clearance", registrarCreatedStudent ? "PENDING" : "LOCKED"),
       enrollment_form: makeStep("step-2", "enrollment_form", "Enrollment Form", "Student", "LOCKED"),
       screening: makeStep("step-3", "screening", "Screening Committee Approval", "Department Dean", "LOCKED"),
       guidance: makeStep("step-4", "guidance", "Guidance Office Approval", "Guidance", "LOCKED"),
@@ -607,10 +608,19 @@ export async function getOwnEnrollmentSession(actorId: string) {
     };
     const clearance = normalizeClearance(existing.clearance, currentStudent);
     const clearanceComplete = clearance.offices.length === clearanceOffices.length && clearance.offices.every((office: Snapshot) => office.status === "signed");
+    const mergedSteps = { ...defaultSteps, ...(existing.steps ?? {}) };
+    const autoVerified = registrarCreatedStudent
+      && mergedSteps.verification.status === "PENDING"
+      && ["DRAFT", "RESUBMIT"].includes(String(form.status));
+    if (autoVerified) {
+      const verifiedAt = new Date().toISOString();
+      mergedSteps.verification = { ...mergedSteps.verification, status: "APPROVED", updatedBy: "Registrar", updatedAt: verifiedAt };
+      if (mergedSteps.clearance.status === "LOCKED") mergedSteps.clearance = { ...mergedSteps.clearance, status: "PENDING", updatedAt: verifiedAt };
+    }
     const nextSession: Snapshot = {
       ...existing,
       student: currentStudent,
-      steps: { ...defaultSteps, ...(existing.steps ?? {}) },
+      steps: mergedSteps,
       form: plan.promote && ["DRAFT", "RESUBMIT"].includes(String(form.status))
         ? { ...form, yearLevel: plan.yearLevel, section: plan.section, term: plan.term, subjects: plan.subjects, totalUnits: plan.subjects.reduce((sum, item) => sum + Number(item.units || 0), 0) }
         : form,
@@ -623,7 +633,7 @@ export async function getOwnEnrollmentSession(actorId: string) {
       .filter((active) => active.studentId === studentId)
       .map((active) => active.office);
     if (clearanceComplete) nextSession.steps.clearance = { ...nextSession.steps.clearance, status: "APPROVED", updatedAt: clearance.completedAt };
-    if (!existing.steps || !existing.form || !existing.clearance || plan.promote) {
+    if (!existing.steps || !existing.form || !existing.clearance || plan.promote || autoVerified) {
       await db.update(enrollmentSessions).set({ session: nextSession, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, studentId));
     }
     return { code: 200, data: { session: { ...nextSession, signatureQueueProcessingOffices } } };
@@ -645,8 +655,8 @@ export async function getOwnEnrollmentSession(actorId: string) {
   const session: Snapshot = {
     student,
     steps: {
-      verification: makeStep("step-0", "verification", "Verification & Standing", "Registrar", "PENDING"),
-      clearance: makeStep("step-1", "clearance", "Online Clearance Check", "Online Clearance", "LOCKED"),
+      verification: makeStep("step-0", "verification", "Verification & Standing", "Registrar", /^\d{8}$/.test(studentId) && Number(studentId) >= 20240770 ? "APPROVED" : "PENDING"),
+      clearance: makeStep("step-1", "clearance", "Online Clearance Check", "Online Clearance", /^\d{8}$/.test(studentId) && Number(studentId) >= 20240770 ? "PENDING" : "LOCKED"),
       enrollment_form: makeStep("step-2", "enrollment_form", "Enrollment Form", "Student", "LOCKED"),
       screening: makeStep("step-3", "screening", "Screening Committee Approval", "Department Dean", "LOCKED"),
       guidance: makeStep("step-4", "guidance", "Guidance Office Approval", "Guidance", "LOCKED"),
