@@ -67,6 +67,7 @@ export type NewServiceRequestInput = {
   purpose: string;
   notes: string;
   attachment?: ServiceRequestAttachmentInput | null;
+  attachments?: ServiceRequestAttachmentInput[];
 };
 
 export type ServiceRequestFilters = {
@@ -91,6 +92,7 @@ export type ServiceRequestDraftInput = {
   purpose: string;
   notes: string;
   attachment?: ServiceRequestAttachmentInput | null;
+  attachments?: ServiceRequestAttachmentInput[];
 };
 
 export type ServiceRequestCreateResult =
@@ -100,7 +102,8 @@ export type ServiceRequestCreateResult =
 export type ServiceRequestUpdateResult =
   | { kind: "updated"; request: any; historyEntry: any }
   | { kind: "not_found" }
-  | { kind: "conflict"; request: any };
+  | { kind: "conflict"; request: any }
+  | { kind: "released_locked"; request: any };
 
 const DEFAULT_SERVICES = [
   { id: 1, code: "TOR", name: "Transcript of Records", description: "Official copy of academic transcript", fee: 150, active: true },
@@ -133,6 +136,7 @@ type MemRequest = {
   attachmentType: string | null;
   attachmentSize: number | null;
   attachmentData: string | null;
+  additionalAttachments: ServiceRequestAttachmentInput[];
   status: string;
   remarks: string | null;
   lastUpdatedById: string | null;
@@ -171,6 +175,7 @@ type MemDraft = {
   attachmentType: string | null;
   attachmentSize: number | null;
   attachmentData: string | null;
+  additionalAttachments: ServiceRequestAttachmentInput[];
   updatedAt: string;
 };
 
@@ -301,6 +306,7 @@ export class ServiceRequestRepository {
           attachmentName: serviceRequests.attachmentName,
           attachmentType: serviceRequests.attachmentType,
           attachmentSize: serviceRequests.attachmentSize,
+          additionalAttachments: serviceRequests.additionalAttachments,
           submittedAt: serviceRequests.submittedAt,
           updatedAt: serviceRequests.updatedAt,
           service: {
@@ -340,6 +346,7 @@ export class ServiceRequestRepository {
           attachmentType: serviceRequests.attachmentType,
           attachmentSize: serviceRequests.attachmentSize,
           attachmentData: serviceRequests.attachmentData,
+          additionalAttachments: serviceRequests.additionalAttachments,
           lastUpdatedByRole: serviceRequests.lastUpdatedByRole,
           submittedAt: serviceRequests.submittedAt,
           updatedAt: serviceRequests.updatedAt,
@@ -393,6 +400,7 @@ export class ServiceRequestRepository {
         attachmentType: data.attachment?.type ?? null,
         attachmentSize: data.attachment?.size ?? null,
         attachmentData: data.attachment?.data ?? null,
+        additionalAttachments: data.attachments ?? [],
         updatedAt: now.toISOString(),
       };
 
@@ -410,6 +418,7 @@ export class ServiceRequestRepository {
             attachmentType: values.attachmentType,
             attachmentSize: values.attachmentSize,
             attachmentData: values.attachmentData,
+            additionalAttachments: values.additionalAttachments,
             updatedAt: values.updatedAt,
           },
         })
@@ -429,6 +438,7 @@ export class ServiceRequestRepository {
       attachmentType: data.attachment?.type ?? null,
       attachmentSize: data.attachment?.size ?? null,
       attachmentData: data.attachment?.data ?? null,
+      additionalAttachments: data.attachments ?? [],
       updatedAt: now.toISOString(),
     };
     memDrafts.set(userId, draft);
@@ -456,7 +466,7 @@ export class ServiceRequestRepository {
     const since = new Date(now.getTime() - DUPLICATE_WINDOW_MS).toISOString();
 
     try {
-      return await db.transaction(async (tx) => {
+      const result = await db.transaction(async (tx) => {
         // Serialise reference generation and the per-student duplicate check so
         // a double-click cannot create two rows.
         await tx.execute(
@@ -505,6 +515,7 @@ export class ServiceRequestRepository {
             attachmentType: data.attachment?.type ?? null,
             attachmentSize: data.attachment?.size ?? null,
             attachmentData: data.attachment?.data ?? null,
+            additionalAttachments: data.attachments ?? [],
             status: "submitted",
           })
           .returning();
@@ -514,6 +525,7 @@ export class ServiceRequestRepository {
           oldStatus: null,
           newStatus: "submitted",
           changedById: userId,
+          changedByName: null,
           changedByRole: "STUDENT",
           remarks: null,
           createdAt: now.toISOString(),
@@ -521,65 +533,13 @@ export class ServiceRequestRepository {
 
         return { kind: "created" as const, request: created };
       });
-    } catch {
-      // Fall through to the in-memory store when Postgres is unreachable.
+      // The student gets a success response only after the request is in the
+      // shared database, where the registrar queue and status actions read it.
+      return result;
+    } catch (error) {
+      console.error("Service request database insert failed:", error);
+      throw error;
     }
-
-    const submitter = await new UserRepository().findById(userId);
-
-    const recent = memRequests
-      .filter(
-        (item) =>
-          item.userId === userId &&
-          item.serviceId === data.serviceId &&
-          item.copies === data.copies &&
-          now.getTime() - new Date(item.submittedAt).getTime() < DUPLICATE_WINDOW_MS,
-      )
-      .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt))[0];
-    if (recent) return { kind: "duplicate", request: recent };
-
-    const timestamp = now.toISOString();
-    const svc = DEFAULT_SERVICES.find((s) => s.id === data.serviceId);
-    const created: MemRequest = {
-      id: randomUUID(),
-      referenceNumber: nextReference(now),
-      userId,
-      serviceId: data.serviceId,
-      copies: data.copies,
-      purpose: data.purpose || null,
-      notes: data.notes || null,
-      attachmentName: data.attachment?.name ?? null,
-      attachmentType: data.attachment?.type ?? null,
-      attachmentSize: data.attachment?.size ?? null,
-      attachmentData: data.attachment?.data ?? null,
-      status: "submitted",
-      remarks: null,
-      lastUpdatedById: null,
-      lastUpdatedByRole: null,
-      lastUpdatedByName: null,
-      submittedAt: timestamp,
-      updatedAt: timestamp,
-      service: svc ? { id: svc.id, name: svc.name, code: svc.code, fee: svc.fee } : null,
-      studentName: submitter?.name ?? null,
-      studentNumber: submitter?.studentNumber ?? null,
-      course: submitter?.course ?? null,
-      yearLevel: submitter?.yearLevel ?? null,
-      email: submitter?.email ?? null,
-    };
-    memRequests.push(created);
-    memHistory.push({
-      id: randomUUID(),
-      requestId: created.id,
-      oldStatus: null,
-      newStatus: "submitted",
-      changedById: userId,
-      changedByRole: "STUDENT",
-      changedByName: submitter?.name ?? null,
-      remarks: null,
-      createdAt: timestamp,
-    });
-
-    return { kind: "created", request: created };
   }
 
   // ── History ────────────────────────────────────────────────────────────────
@@ -593,7 +553,7 @@ export class ServiceRequestRepository {
           oldStatus: serviceRequestHistory.oldStatus,
           newStatus: serviceRequestHistory.newStatus,
           changedByRole: serviceRequestHistory.changedByRole,
-          changedByName: changer.name,
+          changedByName: sql<string | null>`coalesce(${serviceRequestHistory.changedByName}, ${changer.name})`,
           remarks: serviceRequestHistory.remarks,
           createdAt: serviceRequestHistory.createdAt,
         })
@@ -671,11 +631,12 @@ export class ServiceRequestRepository {
       attachmentName: serviceRequests.attachmentName,
       attachmentType: serviceRequests.attachmentType,
       attachmentSize: serviceRequests.attachmentSize,
+      ...(includeAttachmentData ? { additionalAttachments: serviceRequests.additionalAttachments } : {}),
       ...(includeAttachmentData ? { attachmentData: serviceRequests.attachmentData } : {}),
       submittedAt: serviceRequests.submittedAt,
       updatedAt: serviceRequests.updatedAt,
       lastUpdatedByRole: serviceRequests.lastUpdatedByRole,
-      lastUpdatedByName: admin.name,
+      lastUpdatedByName: sql<string | null>`coalesce(${admin.name}, ${serviceRequests.lastUpdatedByName})`,
       service: {
         id: services.id,
         name: services.name,
@@ -714,7 +675,15 @@ export class ServiceRequestRepository {
         .leftJoin(student, eq(student.id, serviceRequests.userId))
         .where(where);
 
-      return { rows, total: Number(totalRow?.value ?? 0) };
+      const pageIds = new Set(rows.map((row) => row.id));
+      const pageReferences = new Set(rows.map((row) => row.referenceNumber));
+      const localRows = memRequests
+        .filter((item) => matchesAdminFilters(item, filters) && !pageIds.has(item.id) && !pageReferences.has(item.referenceNumber))
+        .sort((a, b) => b.submittedAt.localeCompare(a.submittedAt));
+      return {
+        rows: [...rows, ...localRows].slice(0, filters.pageSize),
+        total: Number(totalRow?.value ?? 0) + localRows.length,
+      };
     } catch {
       // Fall through to memory
     }
@@ -728,9 +697,10 @@ export class ServiceRequestRepository {
     };
   }
 
-  async findAdminById(id: string) {
+  async findAdminById(id: string, referenceNumber?: string) {
     const student = alias(users, "sr_student");
     const admin = alias(users, "sr_admin");
+    const legacyRequest = memRequests.find((item) => item.id === id);
 
     try {
       const [row] = await db
@@ -739,15 +709,18 @@ export class ServiceRequestRepository {
         .innerJoin(services, eq(serviceRequests.serviceId, services.id))
         .leftJoin(student, eq(student.id, serviceRequests.userId))
         .leftJoin(admin, eq(admin.id, serviceRequests.lastUpdatedById))
-        .where(eq(serviceRequests.id, id))
+        .where(or(
+          eq(serviceRequests.id, id),
+          ...(referenceNumber ? [eq(serviceRequests.referenceNumber, referenceNumber)] : []),
+          ...(legacyRequest ? [eq(serviceRequests.referenceNumber, legacyRequest.referenceNumber)] : []),
+        ))
         .limit(1);
-      return row ?? null;
+      if (row) return row;
     } catch {
       // Fall through to memory
     }
 
-    const found = memRequests.find((item) => item.id === id);
-    return found ? withServiceSnapshot(found) : null;
+    return legacyRequest ? withServiceSnapshot(legacyRequest) : null;
   }
 
   async getAdminSummary() {
@@ -798,7 +771,7 @@ export class ServiceRequestRepository {
           .where(eq(serviceRequests.id, id))
           .limit(1);
 
-        if (!current) return { kind: "not_found" as const };
+        if (!current) return null;
 
         if (
           input.expectedUpdatedAt &&
@@ -811,6 +784,9 @@ export class ServiceRequestRepository {
         const nextStatus = input.status
           ? normalizeRequestStatus(input.status)
           : normalizeRequestStatus(current.status);
+        if (normalizeRequestStatus(current.status) === "released" && nextStatus !== "released") {
+          return { kind: "released_locked" as const, request: current };
+        }
         const nextRemarks =
           input.remarks !== undefined ? input.remarks : current.remarks;
         const statusChanged = nextStatus !== normalizeRequestStatus(current.status);
@@ -823,6 +799,7 @@ export class ServiceRequestRepository {
             status: nextStatus,
             remarks: nextRemarks,
             lastUpdatedById: admin.id,
+            lastUpdatedByName: admin.name,
             lastUpdatedByRole: admin.role,
             updatedAt: now.toISOString(),
           })
@@ -838,6 +815,7 @@ export class ServiceRequestRepository {
               oldStatus: normalizeRequestStatus(current.status),
               newStatus: nextStatus,
               changedById: admin.id,
+              changedByName: admin.name,
               changedByRole: admin.role,
               remarks: input.remarks !== undefined ? input.remarks : null,
               createdAt: now.toISOString(),
@@ -847,6 +825,7 @@ export class ServiceRequestRepository {
 
         return { kind: "updated" as const, request: updated, historyEntry };
       });
+      if (result) return result;
     } catch {
       // Fall through to memory
     }
@@ -864,6 +843,9 @@ export class ServiceRequestRepository {
 
     const oldStatus = normalizeRequestStatus(current.status);
     const nextStatus = input.status ? normalizeRequestStatus(input.status) : oldStatus;
+    if (oldStatus === "released" && nextStatus !== "released") {
+      return { kind: "released_locked", request: current };
+    }
     const statusChanged = nextStatus !== oldStatus;
     const remarksChanged =
       input.remarks !== undefined && input.remarks !== (current.remarks ?? "");

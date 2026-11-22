@@ -11,8 +11,8 @@ export type JwtPayload = {
 const jwtSecret = ENV.JWT_SECRET;
 
 export enum TokenExpiry {
-  ACCESS_TOKEN_EXPIRES = "15m",
-  REFRESH_TOKEN_EXPIRES = "7d",
+  ACCESS_TOKEN_EXPIRES = "1h",
+  REFRESH_TOKEN_EXPIRES = "30d",
 }
 
 export function signAccessToken(userId: string, role: string, duration: SignOptions["expiresIn"]) {

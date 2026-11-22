@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, uuid, text, timestamp, integer, boolean, serial, index, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, pgEnum, uuid, text, timestamp, integer, boolean, serial, index, uniqueIndex, jsonb } from "drizzle-orm/pg-core";
 
 export const role = pgEnum("Role", [
   "USER",
@@ -125,9 +125,11 @@ export const serviceRequests = pgTable("service_request", {
   attachmentType: text("attachment_type"),
   attachmentSize: integer("attachment_size"),
   attachmentData: text("attachment_data"),
+  additionalAttachments: jsonb("additional_attachments").$type<Array<{ name: string; type: string; size: number; data: string }>>().default([]).notNull(),
   status: text().default("submitted").notNull(),
   remarks: text(),
-  lastUpdatedById: uuid("last_updated_by_id").references(() => users.id, { onDelete: "set null" }),
+  lastUpdatedById: uuid("last_updated_by_id"),
+  lastUpdatedByName: text("last_updated_by_name"),
   lastUpdatedByRole: text("last_updated_by_role"),
   submittedAt: timestamp("submitted_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
@@ -148,6 +150,7 @@ export const serviceRequestDrafts = pgTable("service_request_draft", {
   attachmentType: text("attachment_type"),
   attachmentSize: integer("attachment_size"),
   attachmentData: text("attachment_data"),
+  additionalAttachments: jsonb("additional_attachments").$type<Array<{ name: string; type: string; size: number; data: string }>>().default([]).notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
 });
 
@@ -157,7 +160,8 @@ export const serviceRequestHistory = pgTable("service_request_history", {
   requestId: uuid("request_id").notNull().references(() => serviceRequests.id, { onDelete: "cascade" }),
   oldStatus: text("old_status"),
   newStatus: text("new_status").notNull(),
-  changedById: uuid("changed_by_id").references(() => users.id, { onDelete: "set null" }),
+  changedById: uuid("changed_by_id"),
+  changedByName: text("changed_by_name"),
   changedByRole: text("changed_by_role"),
   remarks: text(),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
@@ -180,6 +184,7 @@ export const complaints = pgTable("complaint", {
   attachmentType: text("attachment_type"),
   attachmentSize: integer("attachment_size"),
   attachmentData: text("attachment_data"),
+  additionalAttachments: jsonb("additional_attachments").$type<Array<{ name: string; type: string; size: number; data: string }>>().default([]).notNull(),
   status: text().default("pending").notNull(), // "pending" | "in_review" | "resolved"
   adminRemarks: text("admin_remarks").default("").notNull(),
   isAnonymous: boolean("is_anonymous").default(false).notNull(),
@@ -247,6 +252,41 @@ export const notifications = pgTable("notification", {
 }, (table) => [
   index("notification_user_idx").on(table.userId),
   index("notification_user_read_created_idx").on(table.userId, table.read, table.createdAt),
+]);
+
+/** Durable staff alerts do not require staff accounts to exist in the student user table. */
+export const officeNotifications = pgTable("office_notification", {
+  id: uuid().defaultRandom().primaryKey(),
+  officeId: text("office_id").notNull(),
+  title: text("title"),
+  message: text().notNull(),
+  type: text().default("info").notNull(),
+  href: text("href"),
+  createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [index("office_notification_target_created_idx").on(table.officeId, table.createdAt)]);
+
+/** Read state is per staff account, even when accounts are supplied by the admin portal. */
+export const officeNotificationReads = pgTable("office_notification_read", {
+  id: uuid().defaultRandom().primaryKey(),
+  notificationId: uuid("notification_id").notNull().references(() => officeNotifications.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").notNull(),
+  readAt: timestamp("read_at", { withTimezone: true, mode: "string" }).defaultNow().notNull(),
+}, (table) => [uniqueIndex("office_notification_read_user_idx").on(table.notificationId, table.userId)]);
+
+export const gradeRecords = pgTable("grade_record", {
+  id: uuid().defaultRandom().primaryKey(),
+  studentUserId: uuid("student_user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  subjectCode: text("subject_code").notNull(),
+  subjectTitle: text("subject_title").notNull(),
+  instructor: text().default("").notNull(),
+  term: text().notNull(),
+  grade: text(),
+  acknowledgedAt: timestamp("acknowledged_at", { withTimezone: true, mode: "string" }),
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).defaultNow().notNull().$onUpdate(() => new Date().toISOString()),
+}, (table) => [
+  index("grade_student_term_idx").on(table.studentUserId, table.term),
+  index("grade_term_subject_idx").on(table.term, table.subjectCode),
+  uniqueIndex("grade_student_subject_term_idx").on(table.studentUserId, table.subjectCode, table.term),
 ]);
 
 // ─── Online Enrollment (Continuing Students - Spec Section 5) ───────────────

@@ -6,6 +6,13 @@ import { sendResult } from "@/lib/api-response";
 
 const repo = new NotificationRepository();
 
+function officeScopes(req: Request): string[] {
+  const role = String((req as AuthenticatedRequest).user?.role ?? "").toUpperCase();
+  if (role === "ADMIN") return ["admin"];
+  if (role === "REGISTRAR") return ["registrar"];
+  return [];
+}
+
 export class NotificationController {
   public getNotifications = async (req: Request, res: Response) => {
     try {
@@ -16,7 +23,7 @@ export class NotificationController {
 
       const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 20));
       const offset = Math.max(0, Number(req.query.offset) || 0);
-      const data = await repo.findPageByUserId(userId, { limit, offset });
+      const data = await repo.findPageByUserId(userId, { limit, offset }, officeScopes(req));
       return sendResult(res, { code: 200, data });
     } catch (error) {
       console.error("getNotifications Error:", error);
@@ -35,7 +42,7 @@ export class NotificationController {
         return sendResult(res, { code: 400, message: "We could not complete that request." });
       }
 
-      await repo.markAsRead(userId, notifId);
+      await repo.markAsRead(userId, notifId, officeScopes(req));
       broadcastNotificationUpdated(userId);
 
       return sendResult(res, { code: 200, message: "Notification marked as read" });
@@ -55,7 +62,7 @@ export class NotificationController {
         return sendResult(res, { code: 401, message: "Please sign in to continue." });
       }
 
-      await repo.markAllAsRead(userId);
+      await repo.markAllAsRead(userId, officeScopes(req));
       broadcastNotificationUpdated(userId);
 
       return sendResult(res, { code: 200, message: "All notifications marked as read" });

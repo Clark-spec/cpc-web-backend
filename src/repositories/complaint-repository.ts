@@ -21,6 +21,7 @@ export type NewComplaintInput = {
   description: string;
   isAnonymous: boolean;
   attachment?: ComplaintAttachmentInput | null;
+  attachments?: ComplaintAttachmentInput[];
 };
 
 export type ComplaintFilters = {
@@ -60,6 +61,7 @@ type MemComplaint = {
   attachmentType: string | null;
   attachmentSize: number | null;
   attachmentData: string | null;
+  additionalAttachments: ComplaintAttachmentInput[];
   status: string;
   adminRemarks: string;
   isAnonymous: boolean;
@@ -121,6 +123,8 @@ export class ComplaintRepository {
           attachmentName: complaints.attachmentName,
           attachmentType: complaints.attachmentType,
           attachmentSize: complaints.attachmentSize,
+          attachmentData: complaints.attachmentData,
+          additionalAttachments: complaints.additionalAttachments,
           status: complaints.status,
           adminRemarks: complaints.adminRemarks,
           isAnonymous: complaints.isAnonymous,
@@ -155,6 +159,7 @@ export class ComplaintRepository {
           attachmentType: complaints.attachmentType,
           attachmentSize: complaints.attachmentSize,
           attachmentData: complaints.attachmentData,
+          additionalAttachments: complaints.additionalAttachments,
           status: complaints.status,
           adminRemarks: complaints.adminRemarks,
           isAnonymous: complaints.isAnonymous,
@@ -250,6 +255,7 @@ export class ComplaintRepository {
             attachmentType: input.attachment?.type ?? null,
             attachmentSize: input.attachment?.size ?? null,
             attachmentData: input.attachment?.data ?? null,
+            additionalAttachments: input.attachments ?? [],
             isAnonymous: input.isAnonymous,
           })
           .returning();
@@ -292,6 +298,7 @@ export class ComplaintRepository {
       attachmentType: input.attachment?.type ?? null,
       attachmentSize: input.attachment?.size ?? null,
       attachmentData: input.attachment?.data ?? null,
+      additionalAttachments: input.attachments ?? [],
       status: "pending",
       adminRemarks: "",
       isAnonymous: input.isAnonymous,
@@ -368,6 +375,7 @@ export class ComplaintRepository {
       attachmentName: complaints.attachmentName,
       attachmentType: complaints.attachmentType,
       attachmentSize: complaints.attachmentSize,
+      ...(includeAttachmentData ? { additionalAttachments: complaints.additionalAttachments } : {}),
       ...(includeAttachmentData ? { attachmentData: complaints.attachmentData } : {}),
       status: complaints.status,
       adminRemarks: complaints.adminRemarks,

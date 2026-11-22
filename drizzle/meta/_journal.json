@@ -78,6 +78,41 @@
       "when": 1795318000000,
       "tag": "0010_staff_signatures",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1795346400000,
+      "tag": "0011_grade_records",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1795350000000,
+      "tag": "0012_multiple_attachments",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1795353600000,
+      "tag": "0013_office_notifications",
+      "breakpoints": true
+    },
+    {
+      "idx": 14,
+      "version": "7",
+      "when": 1795360000000,
+      "tag": "0014_service_request_actor_snapshots",
+      "breakpoints": true
+    },
+    {
+      "idx": 15,
+      "version": "7",
+      "when": 1795370000000,
+      "tag": "0015_backfill_enrollment_and_staff_tables",
+      "breakpoints": true
     }
   ]
 }

@@ -292,7 +292,12 @@ export class UserRepository {
         .select({ id: users.id })
         .from(users)
         .where(inArray(users.role, roles as (typeof role.enumValues)[number][]));
-      return rows.map((row) => row.id);
+      if (rows.length > 0) return rows.map((row) => row.id);
+      // Keep the seeded in-memory staff accounts reachable when the users
+      // table is connected but has not been populated with staff records.
+      return memUsers
+        .filter((user) => roles.includes(String(user.role)))
+        .map((user) => user.id);
     } catch {
       return memUsers
         .filter((user) => roles.includes(String(user.role)))

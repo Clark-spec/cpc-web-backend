@@ -8,7 +8,6 @@ import { NotificationRepository } from "@/repositories/notification-repository";
 import {
   broadcastComplaintUpdated,
   broadcastNotificationCreated,
-  broadcastNotificationUpdated,
 } from "@/services/sse";
 import { COMPLAINT_COOLDOWN_HOURS } from "@/schema/complaint-schema";
 
@@ -68,6 +67,10 @@ function toStudentDto(row: any) {
     anonymous: row.isAnonymous === true,
     attachmentName: row.attachmentName ?? null,
     attachmentUrl: row.attachmentData ?? null,
+    attachments: [
+      ...(row.attachmentName ? [{ name: row.attachmentName, type: row.attachmentType ?? "", url: row.attachmentData ?? null }] : []),
+      ...((row.additionalAttachments ?? []).map((file: any) => ({ name: file.name, type: file.type ?? "", url: file.data ?? null }))),
+    ],
     adminRemarks: row.adminRemarks ?? "",
   };
 }
@@ -101,6 +104,10 @@ function toAdminDto(row: any, includeAttachment = false) {
 
   if (includeAttachment) {
     dto.attachmentUrl = row.attachmentData ?? null;
+    dto.attachments = [
+      ...(row.attachmentName ? [{ name: row.attachmentName, type: row.attachmentType ?? "", url: row.attachmentData ?? null }] : []),
+      ...((row.additionalAttachments ?? []).map((file: any) => ({ name: file.name, type: file.type ?? "", url: file.data ?? null }))),
+    ];
   }
 
   return dto;
@@ -252,16 +259,23 @@ async function notifyAdminsOfNewComplaint(
       ...adminIds.map((id) => ({ id, targetRole: "admin" })),
       ...officeIds.map((id) => ({ id, targetRole: targetRole ?? "admin" })),
     ];
-    await Promise.all(recipients.map(({ id, targetRole: recipientRole }) =>
-        notificationRepo.create(id, {
+    await Promise.all(recipients.map(async ({ id, targetRole: recipientRole }) => {
+        const notification = await notificationRepo.create(id, {
           title: "New Complaint Submitted",
           message,
           type: "info",
           officeId: recipientRole,
           href: "/admin/support/complaints",
-        }),
-    ));
-    recipients.forEach(({ id }) => broadcastNotificationUpdated(id));
+        });
+        broadcastNotificationCreated(id, {
+          id: notification.id,
+          title: notification.title ?? null,
+          message: notification.message,
+          type: notification.type,
+          href: notification.href ?? null,
+          createdAt: notification.createdAt,
+        });
+      }));
   } catch (error) {
     console.error("notifyAdminsOfNewComplaint Error:", error);
   }
@@ -301,14 +315,18 @@ export const createComplaintService = async (userId: string, body: any) => {
       category: String(body.category ?? ""),
       description: sanitizeText(String(body.description ?? ""), 2000),
       isAnonymous: body.isAnonymous === true,
-      attachment: body.attachment
+      attachment: (Array.isArray(body.attachments) ? body.attachments[0] : body.attachment)
         ? {
-            name: sanitizeFileName(String(body.attachment.name ?? "")),
-            type: String(body.attachment.type ?? ""),
-            size: Number(body.attachment.size),
-            data: String(body.attachment.data ?? ""),
+            name: sanitizeFileName(String((Array.isArray(body.attachments) ? body.attachments[0] : body.attachment).name ?? "")),
+            type: String((Array.isArray(body.attachments) ? body.attachments[0] : body.attachment).type ?? ""),
+            size: Number((Array.isArray(body.attachments) ? body.attachments[0] : body.attachment).size),
+            data: String((Array.isArray(body.attachments) ? body.attachments[0] : body.attachment).data ?? ""),
           }
         : null,
+      attachments: (Array.isArray(body.attachments) ? body.attachments.slice(1) : []).map((file: any) => ({
+        name: sanitizeFileName(String(file.name ?? "")), type: String(file.type ?? ""),
+        size: Number(file.size), data: String(file.data ?? ""),
+      })),
     };
 
     const result = await complaintRepo.create(userId, input);

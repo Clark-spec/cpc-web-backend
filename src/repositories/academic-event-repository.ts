@@ -110,6 +110,10 @@ function fromSeed(): AcademicEventRecord[] {
 }
 
 const memEvents: AcademicEventRecord[] = fromSeed();
+// Tracks only events written through the in-memory fallback, so a successful
+// database read can still include a just-published event after a transient
+// write failure. Seed examples are not mixed into a healthy database result.
+const localOnlyEventIds = new Set<string>();
 
 function toRecord(row: typeof academicEvents.$inferSelect): AcademicEventRecord {
   return {
@@ -127,6 +131,12 @@ function toRecord(row: typeof academicEvents.$inferSelect): AcademicEventRecord 
     createdById: row.createdById ?? null,
     createdByRole: row.createdByRole ?? null,
   };
+}
+
+function isForeignKeyViolation(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) return false;
+  const queryError = error as { code?: unknown; cause?: { code?: unknown } };
+  return queryError.code === "23503" || queryError.cause?.code === "23503";
 }
 
 function matches(event: AcademicEventRecord, filters: AcademicEventFilters) {
@@ -207,6 +217,7 @@ export class AcademicEventRepository {
       ? { ...filters, status: undefined, statuses: [...STUDENT_VISIBLE_ACADEMIC_EVENT_STATUSES] }
       : filters;
     const offset = (filters.page - 1) * filters.pageSize;
+    const hasLocalOnlyEvents = localOnlyEventIds.size > 0;
 
     try {
       const where = dbConditions(scoped);
@@ -216,14 +227,27 @@ export class AcademicEventRepository {
           .from(academicEvents)
           .where(where)
           .orderBy(asc(academicEvents.startDate), asc(academicEvents.startTime))
-          .limit(filters.pageSize)
-          .offset(offset),
+          .limit(hasLocalOnlyEvents ? offset + filters.pageSize : filters.pageSize)
+          .offset(hasLocalOnlyEvents ? 0 : offset),
         db.select({ value: count() }).from(academicEvents).where(where),
       ]);
 
+      const dbEvents = rows.map(toRecord);
+      if (!hasLocalOnlyEvents) {
+        return { events: dbEvents, total: Number(totalRow?.value ?? 0) };
+      }
+
+      const dbIds = new Set(dbEvents.map((event) => event.id));
+      const localOnlyEvents = memEvents.filter(
+        (event) =>
+          localOnlyEventIds.has(event.id) &&
+          !dbIds.has(event.id) &&
+          matches(event, scoped),
+      );
+      const merged = sortForCalendar([...dbEvents, ...localOnlyEvents]);
       return {
-        events: rows.map(toRecord),
-        total: Number(totalRow?.value ?? 0),
+        events: merged.slice(offset, offset + filters.pageSize),
+        total: Number(totalRow?.value ?? 0) + localOnlyEvents.length,
       };
     } catch {
       const filtered = sortForCalendar(memEvents.filter((event) => matches(event, scoped)));
@@ -241,7 +265,13 @@ export class AcademicEventRepository {
         .from(academicEvents)
         .where(eq(academicEvents.id, id))
         .limit(1);
-      if (!row) return null;
+      if (!row) {
+        if (!localOnlyEventIds.has(id)) return null;
+        const localEvent = memEvents.find((item) => item.id === id) ?? null;
+        if (!localEvent) return null;
+        if (options.publicOnly && !isStudentVisibleAcademicEventStatus(localEvent.status)) return null;
+        return localEvent;
+      }
       const record = toRecord(row);
       if (options.publicOnly && !isStudentVisibleAcademicEventStatus(record.status)) return null;
       return record;
@@ -255,16 +285,27 @@ export class AcademicEventRepository {
 
   async create(input: AcademicEventInput, actor: AcademicEventActor): Promise<AcademicEventRecord> {
     try {
-      const [row] = await db
+      let [row] = await db
         .insert(academicEvents)
-        .values({
-          ...input,
-          createdById: actor.id,
-          createdByRole: actor.role,
-        })
+        .values({ ...input, createdById: actor.id, createdByRole: actor.role })
         .returning();
+      // Demo-auth users may exist only in UserRepository's fallback store.
+      // Keep the event durable even when that non-database ID cannot satisfy
+      // academic_event.created_by_id's foreign key.
+      if (!row) throw new Error("Calendar event insert returned no row.");
       return toRecord(row);
-    } catch {
+    } catch (error) {
+      if (isForeignKeyViolation(error)) {
+        try {
+          const [row] = await db
+            .insert(academicEvents)
+            .values({ ...input, createdById: null, createdByRole: actor.role })
+            .returning();
+          if (row) return toRecord(row);
+        } catch {
+          // Continue to the existing in-memory fallback when persistence is unavailable.
+        }
+      }
       // Fall through to memory when Postgres is unreachable.
     }
 
@@ -278,6 +319,7 @@ export class AcademicEventRepository {
       updatedAt: now,
     };
     memEvents.push(event);
+    localOnlyEventIds.add(event.id);
     return event;
   }
 
@@ -307,6 +349,7 @@ export class AcademicEventRepository {
       createdById: current.createdById,
       createdByRole: current.createdByRole,
     });
+    localOnlyEventIds.add(current.id);
     if (actor.role) current.createdByRole = current.createdByRole ?? actor.role;
     return current;
   }
@@ -325,6 +368,7 @@ export class AcademicEventRepository {
     const index = memEvents.findIndex((item) => item.id === id);
     if (index < 0) return false;
     memEvents.splice(index, 1);
+    localOnlyEventIds.delete(id);
     return true;
   }
 }

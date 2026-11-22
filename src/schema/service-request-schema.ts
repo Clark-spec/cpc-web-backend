@@ -57,6 +57,7 @@ export const createServiceRequestSchema = z.object({
       .max(1000, "Notes must be 1000 characters or fewer")
       .optional(),
     attachment: attachmentSchema.nullish(),
+    attachments: z.array(attachmentSchema).max(2).optional(),
   }),
 });
 
@@ -71,6 +72,7 @@ export const saveServiceRequestDraftSchema = z.object({
     purpose: z.string().trim().max(120, "Purpose must be 120 characters or fewer").optional(),
     notes: z.string().trim().max(1000, "Notes must be 1000 characters or fewer").optional(),
     attachment: attachmentSchema.nullish(),
+    attachments: z.array(attachmentSchema).max(2).optional(),
     /** Draft saves only: delete the attachment stored with the draft. */
     removeAttachment: z.boolean().optional(),
   }),

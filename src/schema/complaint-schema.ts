@@ -70,6 +70,7 @@ export const createComplaintSchema = z.object({
       .max(2000, "Description must be 2000 characters or fewer"),
     isAnonymous: z.boolean().optional(),
     attachment: attachmentSchema.nullish(),
+    attachments: z.array(attachmentSchema).max(2).optional(),
   }),
 });
 

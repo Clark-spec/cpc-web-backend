@@ -58,6 +58,16 @@ function formatDocument(req: any) {
   };
 }
 
+function formatDocuments(req: any) {
+  const first = formatDocument(req);
+  return [
+    ...(first ? [first] : []),
+    ...((req?.additionalAttachments ?? []).map((file: any) => ({
+      name: file.name, size: file.size ?? 0, mime: file.type ?? "",
+    }))),
+  ];
+}
+
 function formatHistory(rows: any[]) {
   return rows.map((row) => {
     const status = normalizeRequestStatus(row.newStatus);
@@ -125,6 +135,7 @@ function formatRequest(req: any, history?: any[]) {
     submittedAt: req.submittedAt,
     updatedAt: req.updatedAt,
     document: formatDocument(req),
+    documents: formatDocuments(req),
     lastUpdatedByRole: req.lastUpdatedByRole ?? null,
     lastUpdatedByName: req.lastUpdatedByName ?? null,
   };
@@ -153,26 +164,12 @@ function toAdminDto(req: any, history?: any[]) {
 /** Document requests go to the Registrar; the Administrator has the global feed. */
 async function notifyAdminsOfNewRequest(referenceNumber: string, serviceName: string) {
   try {
-    const [adminIds, registrarIds] = await Promise.all([
-      userRepo.findIdsByRoles(["ADMIN"]),
-      userRepo.findIdsByRoles(["REGISTRAR"]),
-    ]);
-    const recipients = [
-      ...adminIds.map((id) => ({ id, targetRole: "admin" })),
-      ...registrarIds.map((id) => ({ id, targetRole: "registrar" })),
-    ];
-    if (recipients.length === 0) return;
-
-    await Promise.all(recipients.map(({ id, targetRole }) =>
-        notificationRepo.create(id, {
-          title: "New Service Request",
-          message: `New service request ${referenceNumber} (${serviceName}) was submitted.`,
-          type: "info",
-          officeId: targetRole,
-          href: "/admin/service-requests",
-        }),
-    ));
-    recipients.forEach(({ id }) => broadcastNotificationUpdated(id));
+    await notificationRepo.createForOffices(["registrar"], {
+      title: "New Service Request",
+      message: `New service request ${referenceNumber} (${serviceName}) was submitted.`,
+      type: "info",
+      href: "/admin/service-requests",
+    });
   } catch (error) {
     console.error("notifyAdminsOfNewRequest Error:", error);
   }
@@ -280,6 +277,10 @@ export const getCatalogService = async () => {
 function formatDraft(draft: any) {
   if (!draft) return null;
   const hasDocument = Boolean(draft.attachmentName);
+  const documents = [
+    ...(hasDocument ? [{ name: draft.attachmentName, type: draft.attachmentType ?? "", size: draft.attachmentSize ?? 0 }] : []),
+    ...((draft.additionalAttachments ?? []).map((file: any) => ({ name: file.name, type: file.type ?? "", size: file.size ?? 0 }))),
+  ];
   return {
     service_id: draft.serviceId ?? null,
     copies: draft.copies ?? 1,
@@ -293,6 +294,7 @@ function formatDraft(draft: any) {
           size: draft.attachmentSize ?? 0,
         }
       : null,
+    documents,
     updated_at: draft.updatedAt,
   };
 }
@@ -330,22 +332,21 @@ export const saveDraftService = async (userId: string, body: any) => {
     const notes = sanitizeText(String(body.notes ?? ""), 1000);
 
     const existing = await requestRepo.findDraftByUserId(userId);
-    let attachment: ServiceRequestAttachmentInput | null = null;
-    if (body.attachment) {
-      attachment = {
-        name: sanitizeFileName(String(body.attachment.name ?? "")),
-        type: String(body.attachment.type ?? ""),
-        size: Number(body.attachment.size),
-        data: String(body.attachment.data ?? ""),
-      };
+    let attachments: ServiceRequestAttachmentInput[] = [];
+    const incomingFiles = Array.isArray(body.attachments) ? body.attachments : (body.attachment ? [body.attachment] : []);
+    if (incomingFiles.length) {
+      attachments = incomingFiles.map((file: any) => ({
+        name: sanitizeFileName(String(file.name ?? "")), type: String(file.type ?? ""),
+        size: Number(file.size), data: String(file.data ?? ""),
+      }));
     } else if (!body.removeAttachment && existing?.attachmentName) {
       // Keep the photo already stored so a second save does not drop it.
-      attachment = {
+      attachments = [{
         name: existing.attachmentName,
         type: existing.attachmentType ?? "",
         size: existing.attachmentSize ?? 0,
         data: existing.attachmentData ?? "",
-      };
+      }, ...(existing.additionalAttachments ?? [])];
     }
 
     const saved = await requestRepo.saveDraft(userId, {
@@ -353,7 +354,8 @@ export const saveDraftService = async (userId: string, body: any) => {
       copies,
       purpose,
       notes,
-      attachment,
+      attachment: attachments[0] ?? null,
+      attachments: attachments.slice(1),
     });
 
     return {
@@ -423,14 +425,12 @@ export const createRequestService = async (
       return { code: 400, status: "error", message: "Select a valid purpose" };
     }
 
-    const attachment = body.attachment
-      ? {
-          name: sanitizeFileName(String(body.attachment.name ?? "")),
-          type: String(body.attachment.type ?? ""),
-          size: Number(body.attachment.size),
-          data: String(body.attachment.data ?? ""),
-        }
-      : null;
+    const normalizedFiles = Array.isArray(body.attachments) ? body.attachments : (body.attachment ? [body.attachment] : []);
+    const attachments = normalizedFiles.map((file: any) => ({
+      name: sanitizeFileName(String(file.name ?? "")),
+      type: String(file.type ?? ""), size: Number(file.size), data: String(file.data ?? ""),
+    }));
+    const attachment = attachments[0] ?? null;
 
     const result = await requestRepo.create(userId, {
       serviceId,
@@ -438,6 +438,7 @@ export const createRequestService = async (
       purpose,
       notes,
       attachment,
+      attachments: attachments.slice(1),
     });
 
     if (result.kind === "duplicate") {
@@ -458,7 +459,7 @@ export const createRequestService = async (
     // The submitted request replaces whatever was still in the draft slot.
     void requestRepo.deleteDraftByUserId(userId).catch(() => {});
 
-    void notifyAdminsOfNewRequest(full?.referenceNumber ?? result.request.referenceNumber, svc.name);
+    await notifyAdminsOfNewRequest(full?.referenceNumber ?? result.request.referenceNumber, svc.name);
     const studentNotification = await notificationRepo.create(userId, {
       title: "Service Request Submitted",
       message: `Your ${svc.name} request has been submitted and is awaiting review.`,
@@ -520,22 +521,27 @@ export const getRequestService = async (userId: string, id: string) => {
   }
 };
 
-export const getOwnedDocumentService = async (userId: string, id: string) => {
+export const getOwnedDocumentService = async (userId: string, id: string, index = 0) => {
   try {
     const req = await requestRepo.findByIdAndUserId(id, userId);
     if (!req) {
       return { code: 404, status: "error", message: "Request not found" };
     }
-    if (!(req as any).attachmentData) {
+    const documents = [
+      ...(req.attachmentData ? [{ name: req.attachmentName, type: req.attachmentType, data: req.attachmentData }] : []),
+      ...((req.additionalAttachments ?? [])),
+    ];
+    const document = documents[index];
+    if (!document?.data) {
       return { code: 404, status: "error", message: "No document attached to this request" };
     }
     return {
       code: 200,
       status: "success",
       data: {
-        name: req.attachmentName ?? "student-id",
-        type: req.attachmentType ?? "application/octet-stream",
-        data: (req as any).attachmentData as string,
+        name: document.name ?? "student-id",
+        type: document.type ?? "application/octet-stream",
+        data: document.data as string,
       },
     };
   } catch (error) {
@@ -590,9 +596,9 @@ export const listAdminRequestsService = async (query: any) => {
   }
 };
 
-export const getAdminRequestService = async (id: string) => {
+export const getAdminRequestService = async (id: string, referenceNumber?: string) => {
   try {
-    const row = await requestRepo.findAdminById(id);
+    const row = await requestRepo.findAdminById(id, referenceNumber);
     if (!row) {
       return { code: 404, status: "error", message: "Request not found" };
     }
@@ -649,6 +655,15 @@ export const updateServiceRequestService = async (
       };
     }
 
+    if (result.kind === "released_locked") {
+      return {
+        code: 409,
+        status: "error",
+        message: "This request has been released and its status can no longer be changed.",
+        data: { request: toAdminDto(result.request) },
+      };
+    }
+
     const [row, history] = await Promise.all([
       requestRepo.findAdminById(id),
       requestRepo.findHistory(id),
@@ -678,22 +693,27 @@ export const updateServiceRequestService = async (
   }
 };
 
-export const getAdminDocumentService = async (id: string) => {
+export const getAdminDocumentService = async (id: string, index = 0) => {
   try {
     const row = await requestRepo.findAdminById(id);
     if (!row) {
       return { code: 404, status: "error", message: "Request not found" };
     }
-    if (!(row as any).attachmentData) {
+    const documents = [
+      ...((row as any).attachmentData ? [{ name: row.attachmentName, type: row.attachmentType, data: (row as any).attachmentData }] : []),
+      ...((row as any).additionalAttachments ?? []),
+    ];
+    const document = documents[index];
+    if (!document?.data) {
       return { code: 404, status: "error", message: "No document attached to this request" };
     }
     return {
       code: 200,
       status: "success",
       data: {
-        name: row.attachmentName ?? "student-id",
-        type: row.attachmentType ?? "application/octet-stream",
-        data: (row as any).attachmentData as string,
+        name: document.name ?? "student-id",
+        type: document.type ?? "application/octet-stream",
+        data: document.data as string,
       },
     };
   } catch (error) {

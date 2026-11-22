@@ -217,7 +217,7 @@ async function notifyStudentsOfCalendarChange(
             title: copy.title,
             message: copy.message,
             type: copy.type,
-            href: STUDENT_CALENDAR_HREF,
+            href: `${STUDENT_CALENDAR_HREF}?eventId=${encodeURIComponent(event.id)}`,
           });
           broadcastNotificationCreated(studentId, {
             id: notification.id,

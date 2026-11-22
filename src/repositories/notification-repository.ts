@@ -1,6 +1,6 @@
 import { eq, and, desc, count, inArray, gte } from "drizzle-orm";
 import { db } from "@/db";
-import { enrollmentSessions, notifications, users } from "@/db/schema";
+import { enrollmentSessions, notifications, users, officeNotifications, officeNotificationReads } from "@/db/schema";
 import { randomUUID } from "node:crypto";
 
 const clearanceLabels: Record<string, string> = {
@@ -102,6 +102,8 @@ export type NotificationPage = {
 
 // Fresh start: no demo notifications
 const memNotifications: NotificationItem[] = [];
+const memOfficeNotifications: Array<NotificationItem & { officeId: string }> = [];
+const memOfficeReads = new Set<string>();
 
 function toItem(row: Omit<NotificationItem, "type"> & { type: string }): NotificationItem {
   return { ...row, type: row.type as NotificationType };
@@ -138,13 +140,14 @@ export class NotificationRepository {
   async findPageByUserId(
     userId: string,
     options: { limit: number; offset: number },
+    officeIds: string[] = [],
   ): Promise<NotificationPage> {
     const limit = Math.min(50, Math.max(1, options.limit));
     const offset = Math.max(0, options.offset);
 
     try {
       await reconcileClearanceNotifications(userId);
-      const [rows, [unreadRow], [totalRow]] = await Promise.all([
+      const [rows, [totalRow]] = await Promise.all([
         db
           .select()
           .from(notifications)
@@ -155,19 +158,34 @@ export class NotificationRepository {
         db
           .select({ value: count() })
           .from(notifications)
-          .where(and(eq(notifications.userId, userId), eq(notifications.read, false))),
-        db
-          .select({ value: count() })
-          .from(notifications)
           .where(eq(notifications.userId, userId)),
       ]);
 
-      const total = Number(totalRow?.value ?? 0);
+      const officeRows = officeIds.length
+        ? await db.select().from(officeNotifications).where(inArray(officeNotifications.officeId, officeIds)).orderBy(desc(officeNotifications.createdAt))
+        : [];
+      const officeReadRows = officeRows.length
+        ? await db.select().from(officeNotificationReads).where(and(eq(officeNotificationReads.userId, userId), inArray(officeNotificationReads.notificationId, officeRows.map((row) => row.id))))
+        : [];
+      const readIds = new Set(officeReadRows.map((row) => row.notificationId));
+      const staffItems: NotificationItem[] = officeRows.map((row) => ({
+        id: row.id, userId, title: row.title, message: row.message,
+        type: row.type as NotificationType, officeId: row.officeId, href: row.href,
+        read: readIds.has(row.id), readAt: null, createdAt: row.createdAt,
+      }));
+      const localRows = memNotifications.filter((item) => item.userId === userId);
+      const localStaffItems = memOfficeNotifications.filter((item) => officeIds.includes(item.officeId)).map((item) => ({
+        ...item, read: memOfficeReads.has(`${userId}:${item.id}`),
+      }));
+      const merged = new Map<string, NotificationItem>();
+      for (const item of [...localRows, ...localStaffItems, ...rows.map(toItem), ...staffItems]) merged.set(item.id, item);
+      const allForUser = [...merged.values()].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const total = allForUser.length;
       return {
-        notifications: rows.map(toItem),
-        unread: Number(unreadRow?.value ?? 0),
-        total,
-        hasMore: offset + rows.length < total,
+        notifications: allForUser.slice(offset, offset + limit),
+        unread: allForUser.filter((item) => !item.read).length,
+        total: Math.max(Number(totalRow?.value ?? 0) + officeRows.length, allForUser.length),
+        hasMore: offset + Math.min(limit, allForUser.length - offset) < Math.max(Number(totalRow?.value ?? 0) + officeRows.length, allForUser.length),
       };
     } catch {
       // Fall through to memory
@@ -176,16 +194,35 @@ export class NotificationRepository {
     const userNotifs = memNotifications
       .filter((n) => n.userId === userId)
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const officeNotifs: NotificationItem[] = memOfficeNotifications
+      .filter((item) => officeIds.includes(item.officeId))
+      .map((item) => ({ ...item, read: memOfficeReads.has(`${userId}:${item.id}`) }))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    const combined = [...userNotifs, ...officeNotifs].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return {
-      notifications: userNotifs.slice(offset, offset + limit),
-      unread: userNotifs.filter((n) => !n.read).length,
-      total: userNotifs.length,
-      hasMore: offset + limit < userNotifs.length,
+      notifications: combined.slice(offset, offset + limit),
+      unread: combined.filter((n) => !n.read).length,
+      total: combined.length,
+      hasMore: offset + limit < combined.length,
     };
   }
 
-  async markAsRead(userId: string, id: string) {
+  async markAsRead(userId: string, id: string, officeIds: string[] = []) {
     const readAt = new Date().toISOString();
+    try {
+      const [officeItem] = officeIds.length ? await db.select({ id: officeNotifications.id }).from(officeNotifications).where(and(eq(officeNotifications.id, id), inArray(officeNotifications.officeId, officeIds))).limit(1) : [];
+      if (officeItem) {
+        await db.insert(officeNotificationReads).values({ notificationId: id, userId, readAt }).onConflictDoNothing();
+        memOfficeReads.add(`${userId}:${id}`);
+        return true;
+      }
+    } catch {
+      // May be an in-memory office notification.
+    }
+    if (memOfficeNotifications.some((item) => item.id === id && officeIds.includes(item.officeId))) {
+      memOfficeReads.add(`${userId}:${id}`);
+      return true;
+    }
     try {
       await db
         .update(notifications)
@@ -203,13 +240,17 @@ export class NotificationRepository {
     return true;
   }
 
-  async markAllAsRead(userId: string) {
+  async markAllAsRead(userId: string, officeIds: string[] = []) {
     const readAt = new Date().toISOString();
     try {
       await db
         .update(notifications)
         .set({ read: true, readAt })
         .where(eq(notifications.userId, userId));
+      if (officeIds.length) {
+        const officeRows = await db.select({ id: officeNotifications.id }).from(officeNotifications).where(inArray(officeNotifications.officeId, officeIds));
+        if (officeRows.length) await db.insert(officeNotificationReads).values(officeRows.map((row) => ({ notificationId: row.id, userId, readAt }))).onConflictDoNothing();
+      }
     } catch {
       // Fall through to memory
     }
@@ -220,6 +261,7 @@ export class NotificationRepository {
         n.readAt = readAt;
       }
     });
+    memOfficeNotifications.forEach((n) => { if (officeIds.includes(n.officeId)) memOfficeReads.add(`${userId}:${n.id}`); });
     return true;
   }
 
@@ -289,5 +331,44 @@ export class NotificationRepository {
 
     memNotifications.unshift(item);
     return item;
+  }
+
+  async createForOffices(officeIds: string[], data: { title: string; message: string; type?: NotificationType; href?: string }) {
+    const normalized = [...new Set(officeIds)];
+    const created: NotificationItem[] = [];
+    for (const officeId of normalized) {
+      const title = data.title;
+      const existsInMemory = memOfficeNotifications.some(
+        (item) => item.officeId === officeId && item.title === title && item.message === data.message,
+      );
+      if (existsInMemory) continue;
+      try {
+        const [existing] = await db
+          .select({ id: officeNotifications.id })
+          .from(officeNotifications)
+          .where(and(
+            eq(officeNotifications.officeId, officeId),
+            eq(officeNotifications.title, title),
+            eq(officeNotifications.message, data.message),
+          ))
+          .limit(1);
+        if (existing) continue;
+        const [row] = await db.insert(officeNotifications).values({ officeId, ...data }).returning();
+        if (row) {
+          created.push({ id: row.id, userId: "", title: row.title, message: row.message, type: row.type as NotificationType, officeId, href: row.href, read: false, readAt: null, createdAt: row.createdAt });
+          continue;
+        }
+      } catch {
+        // Keep the in-memory fallback usable when the database is unavailable.
+      }
+      const item: NotificationItem & { officeId: string } = {
+        id: randomUUID(), userId: "", officeId, title: data.title ?? null,
+        message: data.message, type: data.type ?? "info", href: data.href ?? null,
+        read: false, readAt: null, createdAt: new Date().toISOString(),
+      };
+      memOfficeNotifications.unshift(item);
+      created.push(item);
+    }
+    return created;
   }
 }

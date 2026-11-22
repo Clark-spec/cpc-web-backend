@@ -99,7 +99,8 @@ export class ServiceRequestController {
 
   public getDocument = async (req: Request, res: Response) => {
     const userId = (req as AuthenticatedRequest).user?.sub ?? "";
-    const result = await getOwnedDocumentService(userId, requestId(req));
+    const requestedIndex = Number(req.query.index ?? 0);
+    const result = await getOwnedDocumentService(userId, requestId(req), Number.isInteger(requestedIndex) && requestedIndex >= 0 ? requestedIndex : 0);
     if (result.code !== 200 || !result.data) {
       return sendResult(res, result);
     }
@@ -112,7 +113,8 @@ export class ServiceRequestController {
   };
 
   public getAdmin = async (req: Request, res: Response) => {
-    const result = await getAdminRequestService(requestId(req));
+    const referenceNumber = typeof req.query.referenceNumber === "string" ? req.query.referenceNumber : undefined;
+    const result = await getAdminRequestService(requestId(req), referenceNumber);
     return sendResult(res, result);
   };
 
@@ -126,7 +128,9 @@ export class ServiceRequestController {
   };
 
   public getAdminDocument = async (req: Request, res: Response) => {
-    const result = await getAdminDocumentService(requestId(req));
+    const requestedIndex = Number(req.query.index ?? 0);
+    const index = Number.isInteger(requestedIndex) && requestedIndex >= 0 ? requestedIndex : 0;
+    const result = await getAdminDocumentService(requestId(req), index);
     if (result.code !== 200 || !result.data) {
       return sendResult(res, result);
     }

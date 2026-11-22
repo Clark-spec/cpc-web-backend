@@ -1,7 +1,7 @@
 ﻿import bcrypt from "bcrypt";
 import { UserRepository } from "@/repositories/user-repository";
 import { TokenRepository } from "@/repositories/token-repository";
-import { signAccessToken, signRefreshToken, TokenExpiry } from "@/lib/jwt";
+import { signAccessToken, signRefreshToken, TokenExpiry, toMilliseconds } from "@/lib/jwt";
 
 export async function loginService(identifier: string, password: string) {
   const userRepository = new UserRepository();
@@ -22,7 +22,10 @@ export async function loginService(identifier: string, password: string) {
     await tokenRepository.createRefreshToken({
       userId: user.id,
       token: refreshToken,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+      expiresAt: new Date(
+        Date.now() +
+          (toMilliseconds(TokenExpiry.REFRESH_TOKEN_EXPIRES) ?? 30 * 24 * 60 * 60 * 1000),
+      ),
     });
 
     // Return success response with full user profile info
