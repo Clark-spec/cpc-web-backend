@@ -232,25 +232,64 @@ async function notifyOffice(office: SignatureOffice, department: string, title: 
     .map((id) => notify(id, office, title, message, `/admin/enrollment/clearance-requests?office=${office}`)));
 }
 
+/** Creates a missing staff/admin request alert without duplicating existing notices. */
+async function ensureOfficeSignatureRequestNotices(
+  office: SignatureOffice,
+  department: string,
+  studentId: string,
+  studentName: string,
+  requestedAt: string,
+) {
+  await userRepository.ensureDemoStaffAccountsForRole(offices[office].role);
+  const recipients = await db.select({ id: users.id, department: users.department }).from(users)
+    .where(eq(users.role, offices[office].role as typeof users.$inferSelect.role));
+  const assigned = recipients.filter((user) => office !== "screening" || departmentMatches(user.department, department));
+  const admins = await db.select({ id: users.id }).from(users).where(eq(users.role, "ADMIN"));
+  const title = `Signature Requested: ${offices[office].label}`;
+  const message = `${studentName} (${studentId}) requested an enrollment signature.`;
+  const href = `/admin/enrollment/clearance-requests?office=${office}`;
+  await Promise.all([...new Set([...assigned.map((user) => user.id), ...admins.map((user) => user.id)])].map(async (userId) => {
+    const [existing] = await db.select({ id: notifications.id }).from(notifications).where(and(
+      eq(notifications.userId, userId),
+      eq(notifications.officeId, office),
+      eq(notifications.title, title),
+      eq(notifications.message, message),
+      gte(notifications.createdAt, requestedAt),
+    )).limit(1);
+    if (!existing) await notify(userId, office, title, message, href);
+  }));
+}
+
 async function notifyStudent(studentId: string, office: SignatureOffice, title: string, message: string, type: "info" | "success" | "warning" = "info") {
   const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
   if (student) await notify(student.id, office, title, message, "/student/queue", type);
 }
 
 /** Replace the original request alert with its final status for staff/admins. */
-async function updateOfficeSignatureNotice(studentId: string, studentName: string, office: SignatureOffice, requestedAt: string, status: "signed" | "rejected") {
+async function updateOfficeSignatureNotice(studentId: string, studentName: string, office: SignatureOffice, requestedAt: string, status: "signed" | "rejected" | "cancelled") {
   const label = offices[office].label;
   const requestedTitle = `Signature Requested: ${label}`;
-  const statusTitle = `Signature ${status === "signed" ? "Signed" : "Rejected"}: ${label}`;
+  const statusTitle = `Signature Request ${status === "signed" ? "Signed" : status === "cancelled" ? "Cancelled" : "Rejected"}: ${label}`;
+  const statusMessage = status === "cancelled"
+    ? `${studentName} (${studentId}) cancelled their enrollment signature request.`
+    : `${studentName} (${studentId}) enrollment signature request was ${status}.`;
   const messages = [
     `${studentName} (${studentId}) requested an enrollment signature.`,
-    `${studentName} (${studentId}) enrollment signature request was ${status}.`,
+    `${studentName} (${studentId}) enrollment signature request was signed.`,
+    `${studentName} (${studentId}) enrollment signature request was rejected.`,
+    `${studentName} (${studentId}) cancelled their enrollment signature request.`,
   ];
   const rows = await db.select({ id: notifications.id, userId: notifications.userId, title: notifications.title, message: notifications.message, read: notifications.read })
     .from(notifications)
     .where(and(
       eq(notifications.officeId, office),
-      inArray(notifications.title, [requestedTitle, statusTitle]),
+      inArray(notifications.title, [
+        requestedTitle,
+        statusTitle,
+        `Signature Signed: ${label}`,
+        `Signature Rejected: ${label}`,
+        `Signature Request Cancelled: ${label}`,
+      ]),
       inArray(notifications.message, messages),
       gte(notifications.createdAt, requestedAt),
     ));
@@ -258,7 +297,7 @@ async function updateOfficeSignatureNotice(studentId: string, studentName: strin
   for (const row of rows) byRecipient.set(row.userId, [...(byRecipient.get(row.userId) ?? []), row]);
   for (const [userId, recipientRows] of byRecipient) {
     const canonical = recipientRows.find((item) => item.title === requestedTitle) ?? recipientRows[0];
-    const message = `${studentName} (${studentId}) enrollment signature request was ${status}.`;
+    const message = statusMessage;
     const changed = canonical.title !== statusTitle || canonical.message !== message || canonical.read;
     if (changed) {
       await db.update(notifications).set({
@@ -276,23 +315,31 @@ async function updateOfficeSignatureNotice(studentId: string, studentName: strin
 }
 
 /** Replace the student's pending request notice too, avoiding a second toast/card. */
-async function updateStudentEnrollmentSignatureNotice(studentId: string, office: SignatureOffice, requestedAt: string, status: "signed" | "rejected") {
+async function updateStudentEnrollmentSignatureNotice(studentId: string, office: SignatureOffice, requestedAt: string, status: "signed" | "rejected" | "cancelled") {
   const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
   if (!student) return;
   const label = offices[office].label;
   const requestedTitle = `Request sent to ${label}`;
-  const statusTitle = `Signature ${status === "signed" ? "signed" : "rejected"}: ${label}`;
+  const statusTitle = `Signature Request ${status === "signed" ? "Signed" : status === "cancelled" ? "Cancelled" : "Rejected"}: ${label}`;
   const rows = await db.select({ id: notifications.id, title: notifications.title, message: notifications.message, read: notifications.read })
     .from(notifications)
     .where(and(
       eq(notifications.userId, student.id),
       eq(notifications.officeId, office),
-      inArray(notifications.title, [requestedTitle, statusTitle]),
+      inArray(notifications.title, [
+        requestedTitle,
+        statusTitle,
+        `Signature signed: ${label}`,
+        `Signature rejected: ${label}`,
+        `Request cancelled: ${label}`,
+      ]),
       gte(notifications.createdAt, requestedAt),
     ));
   if (!rows.length) return;
   const canonical = rows.find((item) => item.title === requestedTitle) ?? rows[0];
-  const message = `Your Study Load signature request to ${label} was ${status}.`;
+  const message = status === "cancelled"
+    ? `Your Study Load signature request to ${label} was cancelled.`
+    : `Your Study Load signature request to ${label} was ${status}.`;
   const changed = canonical.title !== statusTitle || canonical.message !== message || canonical.read;
   if (changed) {
     await db.update(notifications).set({
@@ -437,9 +484,16 @@ export async function getOfficeSignatureRequests(actorId: string, role: string, 
       ]).catch((error) => console.error("Could not reconcile enrollment signature notifications", error));
     }));
   const sessions = allSessions.filter((session) => {
-    if (!session?.signatureRequests?.[office] || session.steps?.[office]?.status === "APPROVED") return false;
+    if (!session?.signatureRequests?.[office]) return false;
     return role !== "DEAN" || departmentMatches(actor?.department ?? null, String(session.student?.department ?? ""));
   });
+  await Promise.all(sessions.filter((session) => session.steps?.[office]?.status === "PENDING").map((session) => ensureOfficeSignatureRequestNotices(
+    office,
+    String(session.student?.department ?? ""),
+    String(session.student?.studentIdNo ?? ""),
+    String(session.student?.name ?? session.student?.studentIdNo ?? "Student"),
+    String(session.signatureRequests[office]),
+  ).catch((error) => console.error("Could not ensure office signature notification", error))));
   return { code: 200, data: { sessions } };
 }
 
@@ -531,8 +585,10 @@ export async function requestOfficeSignature(actorId: string, studentIdInput: st
   session.steps[office] = { ...session.steps[office], status: "PENDING" };
   await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
   const fullName = String(session.student?.name ?? studentId);
-  await notifyOffice(office, String(session.student?.department ?? ""), `Signature Requested: ${offices[office].label}`, `${fullName} (${studentId}) requested an enrollment signature.`);
-  await notifyStudent(studentId, office, `Request sent to ${offices[office].label}`, `Your Study Load signature request was sent to ${offices[office].label}.`, "success");
+  await Promise.all([
+    ensureOfficeSignatureRequestNotices(office, String(session.student?.department ?? ""), studentId, fullName, now),
+    notifyStudent(studentId, office, `Request sent to ${offices[office].label}`, `Your Study Load signature request was sent to ${offices[office].label}.`, "success"),
+  ]).catch((error) => console.error("Enrollment signature request saved, but a notification could not be delivered", error));
   return { code: 200, data: { session } };
 }
 
@@ -554,9 +610,10 @@ export async function cancelOfficeSignatureRequest(actorId: string, studentIdInp
   session.steps[office] = { ...session.steps[office], status: "PENDING", respondedAt: undefined, updatedAt: now };
   await db.update(enrollmentSessions).set({ session, updatedAt: now }).where(eq(enrollmentSessions.studentId, studentId));
   const fullName = String(session.student?.name ?? studentId);
-  const label = offices[office].label;
-  await notifyOffice(office, String(session.student?.department ?? ""), `Signature Request Cancelled: ${label}`, `${fullName} (${studentId}) cancelled their enrollment signature request.`);
-  await notifyStudent(studentId, office, `Request cancelled: ${label}`, `Your Study Load signature request to ${label} was cancelled.`, "warning");
+  await Promise.all([
+    updateOfficeSignatureNotice(studentId, fullName, office, requestedAt, "cancelled"),
+    updateStudentEnrollmentSignatureNotice(studentId, office, requestedAt, "cancelled"),
+  ]).catch((error) => console.error("Could not update enrollment signature cancellation notifications", error));
   return { code: 200, data: { session, cancelledAt: now, requestedAt } };
 }
 

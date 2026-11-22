@@ -74,6 +74,20 @@ async function seed() {
       department: "College of Computer Studies",
     },
     {
+      name: "Mrs. Grace Tan",
+      email: "guidance@cpc.edu.ph",
+      password: defaultPassword,
+      role: "GUIDANCE" as const,
+      department: "Guidance Office",
+    },
+    {
+      name: "Dr. Arthur Morales",
+      email: "clinic@cpc.edu.ph",
+      password: defaultPassword,
+      role: "CLINIC" as const,
+      department: "Clinic",
+    },
+    {
       name: "Harry Styles",
       email: "student@cpc.edu.ph",
       studentNumber: "STU-2026-0042",
