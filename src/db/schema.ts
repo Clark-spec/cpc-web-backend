@@ -423,6 +423,7 @@ export const signatureOfficeDailyCounts = pgTable("signature_office_daily_count"
   office: text().notNull(),
   localDate: text("local_date").notNull(),
   requestCount: integer("request_count").default(0).notNull(),
+  lastQueueNumber: integer("last_queue_number").default(0).notNull(),
 }, (table) => [primaryKey({ columns: [table.queueType, table.office, table.localDate] })]);
 
 /** One active signature request per office and workflow, without public identity data. */

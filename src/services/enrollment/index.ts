@@ -154,9 +154,79 @@ export async function finishSignatureQueueProcessing(actorId: string, role: stri
 
 /** Public board payload intentionally contains queue identifiers only. */
 export async function getPublicSignatureBoards() {
-  const rows = await db.select({ session: enrollmentSessions.session }).from(enrollmentSessions);
-  const sessions = rows.map((row) => row.session as Snapshot);
-  const activeRows = await db.select().from(signatureQueueProcessing);
+  const [rows, studentAccounts, processingRows] = await Promise.all([
+    db.select({ studentId: enrollmentSessions.studentId, session: enrollmentSessions.session }).from(enrollmentSessions),
+    db.select({ studentNumber: users.studentNumber }).from(users).where(eq(users.role, "STUDENT")),
+    db.select().from(signatureQueueProcessing),
+  ]);
+  const accountStudentIds = new Set(studentAccounts.map((row) => String(row.studentNumber ?? "")).filter(Boolean));
+  const localDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const orphanedSessions = rows.filter(({ studentId, session: value }) => {
+    const session = value as Snapshot;
+    if (accountStudentIds.has(studentId)) return false;
+    const hasStudyLoadQueue = Object.entries(session.signatureRequests ?? {}).some(([office, requestedAt]) =>
+      Boolean(requestedAt && session.steps?.[office]?.status === "PENDING" && session.signatureQueue?.[office]?.number),
+    );
+    const hasClearanceQueue = (session.clearance?.offices ?? []).some((office: Snapshot) =>
+      office.status === "requested" && office.queueNumber,
+    );
+    return hasStudyLoadQueue || hasClearanceQueue;
+  });
+  const orphanedIds = new Set(orphanedSessions.map(({ studentId }) => studentId));
+  const activeRows = processingRows.filter((row) => !row.studentId || accountStudentIds.has(row.studentId));
+
+  // Reconcile work left behind if a student account was deleted before queue
+  // cleanup was deployed. The board read is shared by both the preview and TV.
+  if (orphanedIds.size || activeRows.length !== processingRows.length) {
+    await db.transaction(async (tx) => {
+      const touchedQueues = new Set<string>();
+      for (const { studentId, session: value } of orphanedSessions) {
+        const session = value as Snapshot;
+        for (const [office, requestedAt] of Object.entries(session.signatureRequests ?? {})) {
+          if (requestedAt && session.steps?.[office]?.status === "PENDING") touchedQueues.add(`study_load:${office}`);
+        }
+        for (const office of session.clearance?.offices ?? []) {
+          if (office.status === "requested" && office.office) touchedQueues.add(`office_signatures:${office.office}`);
+        }
+        await tx.delete(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId));
+        await tx.delete(signatureQueueProcessing).where(eq(signatureQueueProcessing.studentId, studentId));
+      }
+      for (const active of processingRows) {
+        if (active.studentId && !accountStudentIds.has(active.studentId)) {
+          touchedQueues.add(`${active.queueType}:${active.office}`);
+          await tx.update(signatureQueueProcessing).set({
+            studentId: null, queueDate: null, queueNumber: null, startedAt: null, startedBy: null,
+          }).where(and(
+            eq(signatureQueueProcessing.queueType, active.queueType),
+            eq(signatureQueueProcessing.office, active.office),
+            eq(signatureQueueProcessing.studentId, active.studentId),
+          ));
+        }
+      }
+      if (touchedQueues.size) {
+        const remaining = (await tx.select({ session: enrollmentSessions.session }).from(enrollmentSessions))
+          .map(({ session }) => session as Snapshot);
+        for (const key of touchedQueues) {
+          const [queueType, office] = key.split(":");
+          const stillHasQueue = remaining.some((session) => queueType === "study_load"
+            ? Boolean(session.signatureRequests?.[office]
+              && session.steps?.[office]?.status === "PENDING"
+              && session.signatureQueue?.[office]?.date === localDate)
+            : (session.clearance?.offices ?? []).some((entry: Snapshot) =>
+              entry.office === office && entry.status === "requested" && entry.queueDate === localDate,
+            ));
+          if (!stillHasQueue) {
+            await tx.update(signatureOfficeDailyCounts).set({ lastQueueNumber: 0 }).where(and(
+              eq(signatureOfficeDailyCounts.queueType, queueType),
+              eq(signatureOfficeDailyCounts.office, office),
+              eq(signatureOfficeDailyCounts.localDate, localDate),
+            ));
+          }
+        }
+      }
+    });
+  }
+  const sessions = rows.filter(({ studentId }) => accountStudentIds.has(studentId)).map((row) => row.session as Snapshot);
   const mapQueue = (queueType: SignatureQueueType, office: string, candidates: Array<{ queueNumber: number; queueDate: string; awaitingPayment?: boolean }>) => {
     const active = activeRows.find((row) => row.queueType === queueType && row.office === office && row.studentId);
     const sorted = candidates.filter((item) => Number.isFinite(item.queueNumber)).sort((a, b) => a.queueDate.localeCompare(b.queueDate) || a.queueNumber - b.queueNumber);
@@ -915,11 +985,12 @@ export async function requestOfficeSignature(actorId: string, studentIdInput: st
     if (!available) return { error: "This signature request is not available yet.", code: 409 };
     if (session.signatureRequests?.[office] && session.steps?.[office]?.status !== "RESUBMIT") return { error: "You already sent a request to this office.", code: 409 };
     const now = new Date().toISOString();
-    const queueNumber = (counter?.requestCount ?? 0) + 1;
+    const requestCount = counter?.requestCount ?? 0;
+    const queueNumber = (counter?.lastQueueNumber ?? 0) + 1;
     session.signatureRequests = { ...session.signatureRequests, [office]: now };
     session.signatureQueue = { ...session.signatureQueue, [office]: { date: localDate, number: queueNumber } };
     session.steps[office] = { ...session.steps[office], status: "PENDING" };
-    await tx.update(signatureOfficeDailyCounts).set({ requestCount: queueNumber }).where(and(
+    await tx.update(signatureOfficeDailyCounts).set({ requestCount: requestCount + 1, lastQueueNumber: queueNumber }).where(and(
       eq(signatureOfficeDailyCounts.queueType, "study_load"),
       eq(signatureOfficeDailyCounts.office, office),
       eq(signatureOfficeDailyCounts.localDate, localDate),
@@ -1199,6 +1270,7 @@ export async function requestClearanceSignatures(actorId: string, officeInputs: 
   const localDate = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
   const result = await db.transaction(async (tx) => {
     const countsByOffice: Partial<Record<ClearanceOffice, number>> = {};
+    const queueNumbersByOffice: Partial<Record<ClearanceOffice, number>> = {};
     for (const office of [...offices].sort()) {
       await tx.insert(signatureOfficeDailyCounts).values({ queueType: "office_signatures", office, localDate, requestCount: 0 }).onConflictDoNothing();
       const [counter] = await tx.select().from(signatureOfficeDailyCounts).where(and(
@@ -1209,6 +1281,7 @@ export async function requestClearanceSignatures(actorId: string, officeInputs: 
       const count = counter?.requestCount ?? 0;
       if (count >= 1000) return { error: `${clearanceLabels[office]} has reached its 1,000 request limit for today. Please try again tomorrow.` };
       countsByOffice[office] = count;
+      queueNumbersByOffice[office] = (counter?.lastQueueNumber ?? 0) + 1;
     }
     const [lockedRow] = await tx.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).for("update");
     if (!lockedRow) return { error: "Student clearance record was not found.", code: 404 };
@@ -1247,11 +1320,14 @@ export async function requestClearanceSignatures(actorId: string, officeInputs: 
       requestedAt,
       studentNote: typeof note === "string" ? note.trim().slice(0, 1000) : undefined,
       queueDate: localDate,
-      queueNumber: (countsByOffice[entry.office as ClearanceOffice] ?? 0) + 1,
+      queueNumber: queueNumbersByOffice[entry.office as ClearanceOffice] ?? 1,
     }));
     session.clearance = record;
     for (const office of offices) {
-      await tx.update(signatureOfficeDailyCounts).set({ requestCount: (countsByOffice[office] ?? 0) + 1 }).where(and(
+      await tx.update(signatureOfficeDailyCounts).set({
+        requestCount: (countsByOffice[office] ?? 0) + 1,
+        lastQueueNumber: queueNumbersByOffice[office] ?? 1,
+      }).where(and(
         eq(signatureOfficeDailyCounts.queueType, "office_signatures"),
         eq(signatureOfficeDailyCounts.office, office),
         eq(signatureOfficeDailyCounts.localDate, localDate),

@@ -7,6 +7,7 @@ import {
   studentProfiles,
   enrollmentSessions,
   signatureQueueProcessing,
+  signatureOfficeDailyCounts,
 } from "@/db/schema";
 import type { SignupInput } from "@/schema/auth-schema";
 import { randomUUID } from "node:crypto";
@@ -450,10 +451,70 @@ export class UserRepository {
         return false;
       }
 
+      const localDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit",
+      }).format(new Date());
+      const [sessionRow] = await tx.select({ session: enrollmentSessions.session })
+        .from(enrollmentSessions)
+        .where(eq(enrollmentSessions.studentId, student.studentNumber))
+        .limit(1);
+      const session = sessionRow?.session as {
+        signatureRequests?: Record<string, unknown>;
+        signatureQueue?: Record<string, { date?: string; number?: number | string }>;
+        steps?: Record<string, { status?: string }>;
+        clearance?: { offices?: Array<{ office?: string; status?: string; queueDate?: string; queueNumber?: number }> };
+      } | undefined;
+      const tracks = new Map<string, { queueType: string; office: string }>();
+      for (const [office, requestAt] of Object.entries(session?.signatureRequests ?? {})) {
+        const queue = session?.signatureQueue?.[office];
+        if (requestAt && session?.steps?.[office]?.status === "PENDING" && queue?.date === localDate) {
+          tracks.set(`study_load:${office}`, { queueType: "study_load", office });
+        }
+      }
+      for (const request of session?.clearance?.offices ?? []) {
+        if (request.status === "requested" && request.office && request.queueDate === localDate) {
+          tracks.set(`office_signatures:${request.office}`, { queueType: "office_signatures", office: request.office });
+        }
+      }
+
+      const activeRows = await tx.select({ queueType: signatureQueueProcessing.queueType, office: signatureQueueProcessing.office })
+        .from(signatureQueueProcessing)
+        .where(eq(signatureQueueProcessing.studentId, student.studentNumber));
+      for (const active of activeRows) {
+        tracks.set(`${active.queueType}:${active.office}`, { queueType: active.queueType, office: active.office });
+      }
+
       // Queue requests and their numbers live in the enrollment session. Remove
       // both the saved session and any active office-processing marker directly.
       await tx.delete(signatureQueueProcessing).where(eq(signatureQueueProcessing.studentId, student.studentNumber));
       await tx.delete(enrollmentSessions).where(eq(enrollmentSessions.studentId, student.studentNumber));
+
+      // Start an office back at #1 after this deletion only if nobody else has
+      // a request waiting or in process there. Otherwise preserve its sequence.
+      if (tracks.size) {
+        const remainingRows = await tx.select({ session: enrollmentSessions.session }).from(enrollmentSessions);
+        for (const track of tracks.values()) {
+          const anotherRequestIsOpen = remainingRows.some(({ session: value }) => {
+            const other = value as typeof session;
+            if (track.queueType === "study_load") {
+              return Boolean(other?.signatureRequests?.[track.office]
+                && other.steps?.[track.office]?.status === "PENDING"
+                && other.signatureQueue?.[track.office]?.date === localDate);
+            }
+            return (other?.clearance?.offices ?? []).some((request) =>
+              request.office === track.office && request.status === "requested" && request.queueDate === localDate,
+            );
+          });
+          if (!anotherRequestIsOpen) {
+            await tx.update(signatureOfficeDailyCounts).set({ lastQueueNumber: 0 }).where(and(
+              eq(signatureOfficeDailyCounts.queueType, track.queueType),
+              eq(signatureOfficeDailyCounts.office, track.office),
+              eq(signatureOfficeDailyCounts.localDate, localDate),
+            ));
+          }
+        }
+      }
+
       // Account-owned rows such as requests, grades, and notifications are
       // removed by their user foreign-key cascades.
       await tx.delete(masterlist).where(eq(masterlist.studentIdNo, student.studentNumber));
