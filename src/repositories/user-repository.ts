@@ -5,11 +5,8 @@ import {
   role,
   masterlist,
   studentProfiles,
-  enrollmentForms,
-  workflowSteps,
+  enrollmentSessions,
   signatureQueueProcessing,
-  queueTickets,
-  auditLogs,
 } from "@/db/schema";
 import type { SignupInput } from "@/schema/auth-schema";
 import { randomUUID } from "node:crypto";
@@ -453,15 +450,12 @@ export class UserRepository {
         return false;
       }
 
-      // These enrollment records use a student number without a foreign key,
-      // so explicitly remove them before deleting the continuing-student row.
+      // Queue requests and their numbers live in the enrollment session. Remove
+      // both the saved session and any active office-processing marker directly.
       await tx.delete(signatureQueueProcessing).where(eq(signatureQueueProcessing.studentId, student.studentNumber));
-      await tx.delete(workflowSteps).where(eq(workflowSteps.studentId, student.studentNumber));
-      await tx.delete(enrollmentForms).where(eq(enrollmentForms.studentId, student.studentNumber));
-      // Department queue details cascade from their parent ticket.
-      await tx.delete(queueTickets).where(eq(queueTickets.studentId, student.studentNumber));
-      // Remove actions authored by this student while retaining staff audit history.
-      await tx.delete(auditLogs).where(eq(auditLogs.actorId, student.id));
+      await tx.delete(enrollmentSessions).where(eq(enrollmentSessions.studentId, student.studentNumber));
+      // Account-owned rows such as requests, grades, and notifications are
+      // removed by their user foreign-key cascades.
       await tx.delete(masterlist).where(eq(masterlist.studentIdNo, student.studentNumber));
       const [deleted] = await tx.delete(users).where(eq(users.id, student.id)).returning({ id: users.id });
       return Boolean(deleted);
