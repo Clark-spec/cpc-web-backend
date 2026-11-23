@@ -1052,17 +1052,31 @@ const clearanceLabels: Record<ClearanceOffice, string> = { dean: "Dean", sao: "S
 const BSIT_2A_GRADE_TERM = "2nd Semester · AY 2025-2026";
 const BSIT_2A_GRADE_CODES = ["F3-DANCE", "F3-READING-VISUAL-ARTS", "F3-SCIENCE-TECHNOLOGY-SOCIETY", "F3-INFORMATION-MANAGEMENT", "F3-IT-TRACK-ELECTIVE-1", "F3-OBJECT-ORIENTED-PROGRAMMING", "F3-PROBABILITIES-STATISTICS", "F3-DATA-COMMUNICATIONS-NETWORKING-1", "F3-QUANTITATIVE-METHODS"];
 function matchesB2A(section: string | null | undefined) { return String(section ?? "").toUpperCase().replace(/[^A-Z0-9]/g, "") === "BSIT2A"; }
-const defaultSaoEvents = [
-  { title: "Brigada Balik Eskwela", attended: false },
-  { title: "Foundation Day", attended: false },
-  { title: "Monday – BSIT and BEED", attended: false },
-  { title: "Mass – Foundation Day", attended: false },
-  { title: "SSG Day Trash Galore", attended: false },
-  { title: "I-CARE Seminar – Officers", attended: false },
-  { title: "Exhibit (Index Card)", attended: false, note: "Pending SAO attendance verification." },
+const defaultSaoEventTitles = [
+  "Brigada Balik Eskwela",
+  "Foundation Day",
+  "Monday – BSIT and BEED",
+  "Mass – Foundation Day",
+  "SSG Day Trash Galore",
+  "I-CARE Seminar – Officers",
+  "Exhibit (Index Card)",
 ];
+function defaultSaoEvents(studentId: string) {
+  let seed = 0;
+  for (const character of studentId) seed = Math.imul(seed ^ character.charCodeAt(0), 16777619);
+  return defaultSaoEventTitles.map((title, index) => {
+    seed = Math.imul(seed ^ (index + 1), 16777619) >>> 0;
+    const status = (["pending", "attended", "not_attended"] as const)[seed % 3];
+    return {
+      title,
+      status,
+      ...(status === "pending" ? { note: "Awaiting SAO attendance verification." } : {}),
+      ...(status === "not_attended" ? { note: "Please contact the SAO for attendance guidance." } : {}),
+    };
+  });
+}
 function initialClearance(student: Snapshot) {
-  return { studentId: student.studentIdNo, studentName: student.name, section: student.section ?? "", program: student.course ?? "", yearLevel: student.yearLevel ?? "", term: "2nd Semester", academicYear: "2025-2026", offices: clearanceOffices.map((office) => ({ office, label: clearanceLabels[office], status: "not_requested" })), subjects: [], saoEvents: defaultSaoEvents.map((event) => ({ ...event })), history: [], periodOpen: true };
+  return { studentId: student.studentIdNo, studentName: student.name, section: student.section ?? "", program: student.course ?? "", yearLevel: student.yearLevel ?? "", term: "2nd Semester", academicYear: "2025-2026", offices: clearanceOffices.map((office) => ({ office, label: clearanceLabels[office], status: "not_requested" })), subjects: [], saoEvents: defaultSaoEvents(String(student.studentIdNo ?? "")), history: [], periodOpen: true };
 }
 function normalizeClearance(value: Snapshot | undefined, student: Snapshot) {
   const base = initialClearance(student);
@@ -1072,8 +1086,19 @@ function normalizeClearance(value: Snapshot | undefined, student: Snapshot) {
     return saved ? { ...office, ...saved, office: office.office, label: office.label } : office;
   });
   const savedEvents = Array.isArray(value?.saoEvents) && value.saoEvents.length > 0 ? value.saoEvents : base.saoEvents;
-  const saoSigned = base.offices.some((office) => office.office === "sao" && office.status === "signed");
-  const saoEvents = savedEvents.map((event: Snapshot) => ({ ...event, attended: saoSigned || event.attended === true }));
+  const saoEvents = base.saoEvents.map((defaultEvent: Snapshot) => {
+    const event = savedEvents.find((saved: Snapshot) => saved.title === defaultEvent.title) as Snapshot | undefined;
+    if (!event) return defaultEvent;
+    const status = ["pending", "attended", "not_attended"].includes(String(event.status))
+      ? event.status
+      : event.attended === true ? "attended" : event.attended === false ? "pending" : defaultEvent.status;
+    return {
+      ...defaultEvent,
+      ...event,
+      status,
+      note: typeof event.note === "string" ? event.note.slice(0, 500) : defaultEvent.note,
+    };
+  });
   const allSigned = base.offices.length === clearanceOffices.length && base.offices.every((office) => office.status === "signed");
   return {
     ...base,
@@ -1115,13 +1140,13 @@ export async function getClearanceRecord(actorId: string, role: string, studentI
     }
   }
   if (role === "STUDENT") await reconcileStudentClearanceNotifications(actorId, state);
-  if (state.offices.some((office: Snapshot) => office.office === "sao" && office.status === "signed") && state.saoEvents.some((event: Snapshot) => event.attended !== true)) {
-    session.clearance = state;
-    await db.update(enrollmentSessions).set({ session, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, studentId));
-  }
   return { code: 200, data: { record: state } };
 }
 export async function listClearanceRecords(actorId: string, role: string) {
+  if (role === "SAO") {
+    const students = await db.select({ studentIdNo: masterlist.studentIdNo }).from(masterlist);
+    for (const student of students) await clearanceRow(String(student.studentIdNo));
+  }
   const all = await db.select().from(enrollmentSessions);
   const officeByRole: Record<string, ClearanceOffice> = { DEAN: "dean", REGISTRAR: "registrar", SAO: "sao", LIBRARY: "library", ACCOUNTING: "accounting" };
   const office = officeByRole[role];
@@ -1250,6 +1275,31 @@ export async function updateClearance(actorId: string, role: string, studentId: 
   const office = operation.office as ClearanceOffice;
   if (!clearanceOffices.includes(office)) return { code: 400, message: "Unknown clearance office." };
   const current = record.offices.find((o: Snapshot) => o.office === office);
+  if (operation.action === "update_sao_events") {
+    if (office !== "sao" || (role !== "SAO" && role !== "ADMIN")) return { code: 403, message: "Only the SAO can update activity attendance." };
+    if (current.status === "not_requested") return { code: 409, message: "The student must request the SAO clearance signature first." };
+    if (!Array.isArray(operation.events) || operation.events.length !== defaultSaoEventTitles.length) {
+      return { code: 400, message: "Submit an attendance status for every SAO activity." };
+    }
+    const byTitle = new Map((operation.events as Snapshot[]).map((event) => [String(event.title ?? ""), event]));
+    if (defaultSaoEventTitles.some((title) => !byTitle.has(title))) return { code: 400, message: "One or more SAO activities are invalid." };
+    const allowedStatuses = ["pending", "attended", "not_attended"];
+    if ((operation.events as Snapshot[]).some((event) => !allowedStatuses.includes(String(event.status ?? "")))) {
+      return { code: 400, message: "One or more SAO attendance statuses are invalid." };
+    }
+    const events = defaultSaoEventTitles.map((title) => {
+      const event = byTitle.get(title) as Snapshot;
+      const status = String(event.status ?? "");
+      const note = typeof event.note === "string" ? event.note.trim().slice(0, 500) : "";
+      return { title, status, ...(note ? { note } : {}) };
+    });
+    record.saoEvents = events;
+    session.clearance = record;
+    await db.update(enrollmentSessions).set({ session, updatedAt: new Date().toISOString() }).where(eq(enrollmentSessions.studentId, targetId));
+    const [student] = await db.select({ id: users.id }).from(users).where(eq(users.studentNumber, targetId)).limit(1);
+    if (student) broadcastEnrollmentQueueUpdated(student.id);
+    return { code: 200, data: { record } };
+  }
   if (role === "STUDENT") {
     if (operation.action === "request") {
       if (!record.periodOpen || current.status === "signed" || current.status === "requested") return { code: 409, message: "This request is not available." };
@@ -1326,7 +1376,6 @@ export async function updateClearance(actorId: string, role: string, studentId: 
       if (role !== "ADMIN" || current.status !== "signed") return { code: 409, message: "Only an administrator can revoke a completed signature." };
       requestTimestamp = current.requestedAt as string | undefined;
       Object.assign(current, { status: "requested", respondedAt: undefined, signerName: undefined, signatureImage: undefined, remarks: operation.remarks });
-      if (office === "sao") record.saoEvents = record.saoEvents.map((event: Snapshot) => ({ ...event, attended: false }));
       const roleForOffice = ({ dean: "DEAN", registrar: "REGISTRAR", sao: "SAO", library: "LIBRARY", accounting: "ACCOUNTING" }[office]) as typeof users.$inferSelect.role;
       await userRepository.ensureDemoStaffAccountsForRole(roleForOffice);
       const recipients = await db.select({ id: users.id, department: users.department }).from(users).where(eq(users.role, roleForOffice));
@@ -1344,7 +1393,6 @@ export async function updateClearance(actorId: string, role: string, studentId: 
       if (current.status !== "requested") return { code: 409, message: "There is no pending request for this office." };
       requestTimestamp = current.requestedAt as string | undefined;
       Object.assign(current, { status: operation.action === "sign" ? "signed" : "rejected", respondedAt: new Date().toISOString(), signerName: operation.signerName, signatureImage: operation.signatureImage, remarks: operation.remarks });
-      if (office === "sao" && operation.action === "sign") record.saoEvents = record.saoEvents.map((event: Snapshot) => ({ ...event, attended: true }));
       const roleForOffice = ({ dean: "DEAN", registrar: "REGISTRAR", sao: "SAO", library: "LIBRARY", accounting: "ACCOUNTING" }[office]) as typeof users.$inferSelect.role;
       await userRepository.ensureDemoStaffAccountsForRole(roleForOffice);
       const recipients = await db.select({ id: users.id, department: users.department }).from(users).where(eq(users.role, roleForOffice));
