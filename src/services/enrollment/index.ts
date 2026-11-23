@@ -161,7 +161,7 @@ export async function getPublicSignatureBoards() {
     const active = activeRows.find((row) => row.queueType === queueType && row.office === office && row.studentId);
     const sorted = candidates.filter((item) => Number.isFinite(item.queueNumber)).sort((a, b) => a.queueDate.localeCompare(b.queueDate) || a.queueNumber - b.queueNumber);
     const activeIsQueued = active && sorted.some((item) => item.queueNumber === active.queueNumber && item.queueDate === active.queueDate);
-    const next = sorted.filter((item) => !activeIsQueued || item.queueNumber !== active?.queueNumber || item.queueDate !== active?.queueDate).slice(0, 5);
+    const next = sorted.filter((item) => !activeIsQueued || item.queueNumber !== active?.queueNumber || item.queueDate !== active?.queueDate).slice(0, 6);
     return {
       office,
       nowServing: active?.studentId ? { queueNumber: active.queueNumber, queueDate: active.queueDate } : null,
@@ -243,16 +243,22 @@ function academicYearAfter(value: string) {
 }
 
 function nextEnrollmentPlan(record: Snapshot, section: string) {
-  const normalizedDepartment = String(record.department ?? "").toUpperCase();
+  const normalizedDepartment = String(record.department ?? record.course ?? "").toUpperCase().replace(/[^A-Z]/g, "");
   const currentSection = section.trim().toUpperCase();
-  const bsitYearTwo = normalizedDepartment.includes("BSIT") && Number(record.yearLevel) === 2 && /^BSIT-2[A-D]$/.test(currentSection);
-  if (!bsitYearTwo) {
+  const normalizedSection = currentSection.replace(/[^A-Z0-9]/g, "");
+  const yearTwoMatch = normalizedSection.match(/^BSIT2([A-D])$/);
+  const yearThreeMatch = normalizedSection.match(/^BSIT3([A-D])$/);
+  const isBSIT = normalizedDepartment.includes("BSIT") || normalizedDepartment.includes("INFORMATIONTECHNOLOGY") || normalizedDepartment.includes("COMPUTERSTUDIES");
+  const eligibleForThirdYearLoad = isBSIT
+    && Number(record.yearLevel) === 2
+    && Boolean(yearTwoMatch || yearThreeMatch);
+  if (!eligibleForThirdYearLoad) {
     return { yearLevel: Number(record.yearLevel) || 1, section: currentSection, term: "2nd Semester 2025-2026", subjects: [] as Snapshot[], promote: false };
   }
   const academicYear = academicYearAfter(String(record.lastTermEnrolled ?? ""));
   return {
     yearLevel: 3,
-    section: currentSection.replace("BSIT-2", "BSIT-3"),
+    section: `BSIT-3${(yearTwoMatch ?? yearThreeMatch)?.[1]}`,
     term: `1st Semester ${academicYear}`,
     subjects: fixedBSITThirdYearLoad.map((subject) => ({ ...subject })),
     promote: true,
@@ -617,12 +623,19 @@ export async function getOwnEnrollmentSession(actorId: string) {
       mergedSteps.verification = { ...mergedSteps.verification, status: "APPROVED", updatedBy: "Registrar", updatedAt: verifiedAt };
       if (mergedSteps.clearance.status === "LOCKED") mergedSteps.clearance = { ...mergedSteps.clearance, status: "PENDING", updatedAt: verifiedAt };
     }
+    const editableForm = ["DRAFT", "RESUBMIT"].includes(String(form.status));
+    const canRepairEmptySubmittedFixedForm = plan.promote
+      && form.type === "preprinted"
+      && (!Array.isArray(form.subjects) || form.subjects.length === 0)
+      && !Object.values(existing.signatureRequests ?? {}).some(Boolean);
+    const shouldApplyThirdYearPlan = plan.promote && (editableForm || canRepairEmptySubmittedFixedForm);
+    const plannedSubjects = plan.subjects;
     const nextSession: Snapshot = {
       ...existing,
       student: currentStudent,
       steps: mergedSteps,
-      form: plan.promote && ["DRAFT", "RESUBMIT"].includes(String(form.status))
-        ? { ...form, yearLevel: plan.yearLevel, section: plan.section, term: plan.term, subjects: plan.subjects, totalUnits: plan.subjects.reduce((sum, item) => sum + Number(item.units || 0), 0) }
+      form: shouldApplyThirdYearPlan
+        ? { ...form, yearLevel: plan.yearLevel, section: plan.section, term: plan.term, subjects: plannedSubjects, totalUnits: plannedSubjects.reduce((sum, item) => sum + Number(item.units || 0), 0) }
         : form,
       signatureRequests: existing.signatureRequests ?? {},
       clearance,
@@ -808,10 +821,10 @@ export async function submitEnrollmentSession(actorId: string, input: unknown) {
   const [record] = await db.select().from(masterlist).where(eq(masterlist.studentIdNo, studentId)).limit(1);
   if (!record) return { code: 404, message: "Student masterlist record was not found." };
   const [account] = await db.select({ section: users.section }).from(users).where(eq(users.id, actorId)).limit(1);
-  const plan = nextEnrollmentPlan(record, account?.section ?? "");
   const [savedRow] = await db.select().from(enrollmentSessions).where(eq(enrollmentSessions.studentId, studentId)).limit(1);
   if (!savedRow) return { code: 409, message: "Verify your Registrar record before submitting the Study Load." };
   const savedSession = savedRow.session as Snapshot;
+  const plan = nextEnrollmentPlan(record, account?.section || String(savedSession.student?.section ?? ""));
   if (savedSession.steps?.verification?.status !== "APPROVED") return { code: 409, message: "Confirm your Registrar record before submitting the Study Load." };
   const clearance = normalizeClearance(savedSession.clearance, savedSession.student ?? {});
   if (clearance.offices.length !== clearanceOffices.length || !clearance.offices.every((office: Snapshot) => office.status === "signed")) {
@@ -1178,6 +1191,10 @@ export async function requestClearanceSignatures(actorId: string, officeInputs: 
     const record = normalizeClearance(session.clearance, session.student ?? {});
     if (!record.periodOpen) return { error: "The Office Signatures request period is closed." };
     if (offices.includes("registrar")) {
+      const requiredPriorOffices = record.offices.filter((entry: Snapshot) => entry.office !== "registrar");
+      if (requiredPriorOffices.length !== 4 || requiredPriorOffices.some((entry: Snapshot) => entry.status !== "signed")) {
+        return { error: "The Registrar clearance request is available after Dean, SAO / SSG Adviser, Library, and Accounting have signed." };
+      }
       const [studentAccount] = await tx.select({ section: users.section }).from(users).where(eq(users.studentNumber, studentId)).limit(1);
       const section = studentAccount?.section ?? record.section ?? "";
       const term = matchesB2A(section) ? BSIT_2A_GRADE_TERM : "1st Semester · AY 2026-2027";
